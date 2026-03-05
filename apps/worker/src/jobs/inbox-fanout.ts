@@ -2,6 +2,7 @@ import { db, eq, schema } from "@yam/db/pg";
 import type { StreamJob } from "@yam/db/redis";
 import { unread } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
+import type { ChatType } from "@yam/shared";
 
 interface InboxFanoutPayload {
 	chatId: string;
@@ -42,7 +43,7 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 			memberId,
 			{
 				chatId,
-				chatType: chat.type,
+				chatType: chat.type as ChatType,
 				chatName,
 				chatAvatar: chat.avatarUrl,
 				otherUserId,

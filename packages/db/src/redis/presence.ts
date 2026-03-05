@@ -19,7 +19,7 @@ export const presence = {
 
 	async setOffline(userId: string): Promise<void> {
 		await redis.del(`${PRESENCE_PREFIX}${userId}`);
-		await redis.set(`${LAST_SEEN_PREFIX}${userId}`, new Date().toISOString());
+		await redis.set(`${LAST_SEEN_PREFIX}${userId}`, new Date().toISOString(), "EX", 30 * 24 * 3600);
 	},
 
 	async isOnline(userId: string): Promise<boolean> {
@@ -167,11 +167,17 @@ export const otp = {
 	},
 };
 
+const USER_CONN_TTL = 120;
+
 export const userConnections = {
 	async add(userId: string, instanceId: string): Promise<void> {
 		const key = `${USER_CONNECTIONS_PREFIX}${userId}`;
 		await redis.sadd(key, instanceId);
-		await redis.expire(key, 60);
+		await redis.expire(key, USER_CONN_TTL);
+	},
+
+	async refresh(userId: string): Promise<void> {
+		await redis.expire(`${USER_CONNECTIONS_PREFIX}${userId}`, USER_CONN_TTL);
 	},
 
 	async remove(userId: string, instanceId: string): Promise<void> {

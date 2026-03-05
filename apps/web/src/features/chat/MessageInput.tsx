@@ -1,6 +1,7 @@
-import { AttachmentType } from "@yam/shared";
-import { File, Mic, Paperclip, Send, X } from "lucide-react";
+import { AttachmentType, type Message } from "@yam/shared";
+import { Edit2, File, Mic, Paperclip, Send, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ALLOWED_FILE_TYPES, env } from "@/env";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
@@ -10,15 +11,24 @@ interface AttachmentItem {
 	uploading: boolean;
 	uploadedUrl?: string;
 	uploadedId?: string;
+	error?: string;
 }
 
 interface Props {
 	onSend: (
 		content: string,
-		attachments?: { type: number; url: string; filename: string; size: number; mimeType: string }[],
+		attachments?: {
+			type: number;
+			url: string;
+			filename: string;
+			size: number;
+			mimeType: string;
+		}[],
 	) => void;
 	onTypingStart: () => void;
 	onTypingStop: () => void;
+	editingMessage?: Message | null;
+	onCancelEdit?: () => void;
 }
 
 function mimeToAttachmentType(mime: string): number {
@@ -28,7 +38,21 @@ function mimeToAttachmentType(mime: string): number {
 	return AttachmentType.DOCUMENT;
 }
 
-export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
+function formatFileSize(bytes: number): string {
+	if (bytes < 1024) return `${bytes}B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+const MAX_FILE_SIZE = env.maxFileSizeMb * 1024 * 1024;
+
+export function MessageInput({
+	onSend,
+	onTypingStart,
+	onTypingStop,
+	editingMessage,
+	onCancelEdit,
+}: Props) {
 	const [content, setContent] = useState("");
 	const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
 	const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -36,6 +60,13 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const previewUrlsRef = useRef<Set<string>>(new Set());
+
+	useEffect(() => {
+		if (editingMessage) {
+			setContent(editingMessage.content);
+			textareaRef.current?.focus();
+		}
+	}, [editingMessage]);
 
 	useEffect(() => {
 		return () => {
@@ -51,6 +82,14 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 		async (e?: React.FormEvent) => {
 			e?.preventDefault();
 			const trimmed = content.trim();
+
+			if (editingMessage) {
+				if (!trimmed) return;
+				onSend(trimmed);
+				setContent("");
+				return;
+			}
+
 			const hasAttachments = attachments.length > 0;
 			if (!trimmed && !hasAttachments) return;
 
@@ -64,7 +103,10 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 					mimeType: a.file.type,
 				}));
 
-			onSend(trimmed || "", uploadedAttachments.length > 0 ? uploadedAttachments : undefined);
+			onSend(
+				trimmed || "",
+				uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+			);
 			setContent("");
 			setAttachments([]);
 			if (isTyping.current) {
@@ -75,7 +117,7 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 				textareaRef.current.style.height = "auto";
 			}
 		},
-		[content, attachments, onSend, onTypingStop],
+		[content, attachments, onSend, onTypingStop, editingMessage],
 	);
 
 	const handleKeyDown = useCallback(
@@ -84,13 +126,19 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 				e.preventDefault();
 				handleSubmit();
 			}
+			if (e.key === "Escape" && editingMessage) {
+				onCancelEdit?.();
+				setContent("");
+			}
 		},
-		[handleSubmit],
+		[handleSubmit, editingMessage, onCancelEdit],
 	);
 
 	const handleChange = useCallback(
 		(e: React.ChangeEvent<HTMLTextAreaElement>) => {
-			setContent(e.target.value);
+			const value = e.target.value;
+			if (value.length > env.maxMessageLength) return;
+			setContent(value);
 
 			if (textareaRef.current) {
 				textareaRef.current.style.height = "auto";
@@ -111,43 +159,90 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 		[onTypingStart, onTypingStop],
 	);
 
-	const handleFileSelect = useCallback(async (files: FileList) => {
-		const newAttachments: AttachmentItem[] = Array.from(files).map((file) => {
-			let preview: string | undefined;
-			if (file.type.startsWith("image/")) {
-				preview = URL.createObjectURL(file);
-				previewUrlsRef.current.add(preview);
+	const validateFile = useCallback(
+		(file: File): string | null => {
+			if (file.size > MAX_FILE_SIZE) {
+				return `File "${file.name}" exceeds ${env.maxFileSizeMb}MB limit`;
 			}
-			return { file, preview, uploading: true };
-		});
-
-		setAttachments((prev) => [...prev, ...newAttachments]);
-
-		for (const attachment of newAttachments) {
-			try {
-				const result = await api.upload<{ id: string; url: string }>(
-					"/files/upload",
-					attachment.file,
-				);
-				setAttachments((prev) =>
-					prev.map((a) =>
-						a.file === attachment.file
-							? { ...a, uploading: false, uploadedUrl: result.url, uploadedId: result.id }
-							: a,
-					),
-				);
-			} catch {
-				setAttachments((prev) => {
-					const removed = prev.find((a) => a.file === attachment.file);
-					if (removed?.preview) {
-						URL.revokeObjectURL(removed.preview);
-						previewUrlsRef.current.delete(removed.preview);
-					}
-					return prev.filter((a) => a.file !== attachment.file);
-				});
+			if (!ALLOWED_FILE_TYPES.has(file.type) && file.type !== "") {
+				return `File type "${file.type}" is not allowed`;
 			}
-		}
-	}, []);
+			return null;
+		},
+		[],
+	);
+
+	const handleFileSelect = useCallback(
+		async (files: FileList) => {
+			const validFiles: { file: File; preview?: string }[] = [];
+			const errors: string[] = [];
+
+			for (const file of Array.from(files)) {
+				const error = validateFile(file);
+				if (error) {
+					errors.push(error);
+					continue;
+				}
+				let preview: string | undefined;
+				if (file.type.startsWith("image/")) {
+					preview = URL.createObjectURL(file);
+					previewUrlsRef.current.add(preview);
+				}
+				validFiles.push({ file, preview });
+			}
+
+			if (errors.length > 0) {
+				console.warn("[FileUpload] Validation errors:", errors);
+			}
+
+			if (validFiles.length === 0) return;
+
+			const newAttachments: AttachmentItem[] = validFiles.map((v) => ({
+				file: v.file,
+				preview: v.preview,
+				uploading: true,
+			}));
+
+			setAttachments((prev) => [...prev, ...newAttachments]);
+
+			for (const attachment of newAttachments) {
+				try {
+					const result = await api.upload<{ id: string; url: string }>(
+						"/files/upload",
+						attachment.file,
+					);
+					setAttachments((prev) =>
+						prev.map((a) =>
+							a.file === attachment.file
+								? {
+										...a,
+										uploading: false,
+										uploadedUrl: result.url,
+										uploadedId: result.id,
+									}
+								: a,
+						),
+					);
+				} catch (err) {
+					setAttachments((prev) =>
+						prev.map((a) =>
+							a.file === attachment.file
+								? {
+										...a,
+										uploading: false,
+										error:
+											err instanceof Error
+												? err.message
+												: "Upload failed",
+									}
+								: a,
+						),
+					);
+				}
+			}
+		},
+		[validateFile],
+	);
 
 	const removeAttachment = useCallback((file: File) => {
 		setAttachments((prev) => {
@@ -162,12 +257,38 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 
 	return (
 		<div className="border-t border-border bg-surface">
+			{editingMessage && (
+				<div className="flex items-center gap-3 border-b border-border px-4 py-2">
+					<Edit2 size={14} className="shrink-0 text-primary" />
+					<div className="min-w-0 flex-1">
+						<p className="text-xs font-medium text-primary">Editing message</p>
+						<p className="truncate text-xs text-text-secondary">
+							{editingMessage.content}
+						</p>
+					</div>
+					<button
+						type="button"
+						onClick={() => {
+							onCancelEdit?.();
+							setContent("");
+						}}
+						className="rounded p-1 hover:bg-surface-hover"
+						aria-label="Cancel edit"
+					>
+						<X size={14} className="text-text-muted" />
+					</button>
+				</div>
+			)}
+
 			{attachments.length > 0 && (
 				<div className="flex gap-2 overflow-x-auto px-4 pt-3">
 					{attachments.map((a, i) => (
 						<div
-							key={`${a.file.name}-${i}`}
-							className="relative shrink-0 rounded-lg border border-border bg-surface-secondary p-1"
+							key={`${a.file.name}-${a.file.size}-${i}`}
+							className={cn(
+								"relative shrink-0 rounded-lg border bg-surface-secondary p-1",
+								a.error ? "border-danger" : "border-border",
+							)}
 						>
 							{a.preview ? (
 								<img
@@ -188,6 +309,13 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 									<div className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
 								</div>
 							)}
+							{a.error && (
+								<div className="absolute inset-0 flex items-center justify-center rounded-lg bg-danger/20">
+									<span className="text-[10px] font-medium text-danger">
+										Failed
+									</span>
+								</div>
+							)}
 							<button
 								type="button"
 								onClick={() => removeAttachment(a.file)}
@@ -202,25 +330,33 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 			)}
 
 			<div className="px-4 py-3">
-				<form onSubmit={handleSubmit} className="mx-auto flex max-w-3xl items-end gap-2">
-					<input
-						ref={fileInputRef}
-						type="file"
-						multiple
-						className="hidden"
-						onChange={(e) => {
-							if (e.target.files) handleFileSelect(e.target.files);
-							e.target.value = "";
-						}}
-					/>
-					<button
-						type="button"
-						onClick={() => fileInputRef.current?.click()}
-						className="mb-1 rounded-full p-2 text-text-secondary hover:bg-surface-hover"
-						aria-label="Attach file"
-					>
-						<Paperclip size={20} />
-					</button>
+				<form
+					onSubmit={handleSubmit}
+					className="mx-auto flex max-w-3xl items-end gap-2"
+				>
+					{!editingMessage && (
+						<>
+							<input
+								ref={fileInputRef}
+								type="file"
+								multiple
+								accept={Array.from(ALLOWED_FILE_TYPES).join(",")}
+								className="hidden"
+								onChange={(e) => {
+									if (e.target.files) handleFileSelect(e.target.files);
+									e.target.value = "";
+								}}
+							/>
+							<button
+								type="button"
+								onClick={() => fileInputRef.current?.click()}
+								className="mb-1 rounded-full p-2 text-text-secondary hover:bg-surface-hover"
+								aria-label="Attach file"
+							>
+								<Paperclip size={20} />
+							</button>
+						</>
+					)}
 
 					<div className="flex-1">
 						<textarea
@@ -228,8 +364,13 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 							value={content}
 							onChange={handleChange}
 							onKeyDown={handleKeyDown}
-							placeholder="Type a message..."
+							placeholder={
+								editingMessage
+									? "Edit message..."
+									: "Type a message..."
+							}
 							rows={1}
+							maxLength={env.maxMessageLength}
 							className={cn(
 								"w-full resize-none rounded-2xl border border-border bg-surface-secondary px-4 py-2.5 text-sm",
 								"text-text-primary placeholder:text-text-muted",
@@ -241,14 +382,17 @@ export function MessageInput({ onSend, onTypingStart, onTypingStop }: Props) {
 					{content.trim() || attachments.length > 0 ? (
 						<button
 							type="submit"
-							disabled={attachments.some((a) => a.uploading)}
+							disabled={
+								(!editingMessage && attachments.some((a) => a.uploading)) ||
+								(!content.trim() && attachments.length === 0)
+							}
 							className={cn(
 								"mb-1 rounded-full bg-primary p-2.5 text-white shadow-sm transition-colors hover:bg-primary-hover",
 								"disabled:opacity-50",
 							)}
-							aria-label="Send message"
+							aria-label={editingMessage ? "Save edit" : "Send message"}
 						>
-							<Send size={18} />
+							{editingMessage ? <Edit2 size={18} /> : <Send size={18} />}
 						</button>
 					) : (
 						<button

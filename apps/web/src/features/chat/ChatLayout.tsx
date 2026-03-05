@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import type { InboxItem } from "@yam/shared";
+import type { InboxItem, User } from "@yam/shared";
 import { useEffect } from "react";
-import { useWebSocket } from "@/hooks/useWebSocket";
+import { ConnectionStatus } from "@/components/ConnectionStatus";
+import { useConnectionStatus, useWebSocket } from "@/hooks/useWebSocket";
 import { api } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
@@ -12,6 +13,7 @@ export function ChatLayout() {
 	const { setUser } = useAuthStore();
 	const { activeChatId, setInbox } = useChatStore();
 	const ws = useWebSocket();
+	const connectionStatus = useConnectionStatus();
 
 	const {
 		data: userData,
@@ -19,7 +21,7 @@ export function ChatLayout() {
 		isError: userError,
 	} = useQuery({
 		queryKey: ["me"],
-		queryFn: () => api.get<any>("/users/me"),
+		queryFn: () => api.get<User>("/users/me"),
 	});
 
 	const {
@@ -29,7 +31,7 @@ export function ChatLayout() {
 	} = useQuery({
 		queryKey: ["inbox"],
 		queryFn: () => api.get<{ chats: InboxItem[] }>("/chats"),
-		refetchInterval: 30_000,
+		refetchInterval: 60_000,
 	});
 
 	useEffect(() => {
@@ -60,6 +62,7 @@ export function ChatLayout() {
 						Check your connection and try refreshing the page.
 					</p>
 					<button
+						type="button"
 						onClick={() => window.location.reload()}
 						className="mt-4 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-hover"
 					>
@@ -71,20 +74,25 @@ export function ChatLayout() {
 	}
 
 	return (
-		<div className="flex h-screen bg-surface-secondary">
-			<ChatSidebar />
-			<main className="flex flex-1 flex-col">
-				{activeChatId ? (
-					<ChatView chatId={activeChatId} ws={ws} />
-				) : (
-					<div className="flex flex-1 items-center justify-center">
-						<div className="text-center">
-							<h2 className="text-2xl font-semibold text-text-secondary">YAM</h2>
-							<p className="mt-2 text-text-muted">Select a chat or start a new conversation</p>
+		<div className="flex h-screen flex-col bg-surface-secondary">
+			<ConnectionStatus status={connectionStatus} />
+			<div className="flex flex-1 overflow-hidden">
+				<ChatSidebar />
+				<main className="flex flex-1 flex-col">
+					{activeChatId ? (
+						<ChatView chatId={activeChatId} ws={ws} />
+					) : (
+						<div className="flex flex-1 items-center justify-center">
+							<div className="text-center">
+								<h2 className="text-2xl font-semibold text-text-secondary">YAM</h2>
+								<p className="mt-2 text-text-muted">
+									Select a chat or start a new conversation
+								</p>
+							</div>
 						</div>
-					</div>
-				)}
-			</main>
+					)}
+				</main>
+			</div>
 		</div>
 	);
 }

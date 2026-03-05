@@ -1,12 +1,13 @@
 import { cors } from "@elysiajs/cors";
 import { db, desc, eq, ilike, schema, sql } from "@yam/db/pg";
-import { connectRedis, redis } from "@yam/db/redis";
-import { connectScylla } from "@yam/db/scylla";
+import { connectRedis, disconnectRedis, redis } from "@yam/db/redis";
+import { connectScylla, disconnectScylla } from "@yam/db/scylla";
 import { UserRole } from "@yam/shared";
 import { verifyAccessToken } from "@yam/shared/jwt";
 import { Elysia, t } from "elysia";
 
 const port = Number(process.env.ADMIN_PORT ?? 3002);
+const ALLOWED_ORIGINS = process.env.CORS_ORIGINS?.split(",").filter(Boolean) ?? [];
 
 await connectRedis();
 await connectScylla();
@@ -20,8 +21,14 @@ async function extractAdminUserId(header: string | null): Promise<string | null>
 	return payload.sub;
 }
 
-const _app = new Elysia()
-	.use(cors())
+const app = new Elysia()
+	.use(
+		cors(
+			ALLOWED_ORIGINS.length > 0
+				? { origin: ALLOWED_ORIGINS, credentials: true }
+				: undefined,
+		),
+	)
 	.derive(async ({ request }) => {
 		const adminUserId = await extractAdminUserId(request.headers.get("authorization"));
 		return { adminUserId };
@@ -154,3 +161,15 @@ const _app = new Elysia()
 	.listen(port);
 
 console.log(`[Admin] Running on http://localhost:${port}`);
+
+async function gracefulShutdown(signal: string) {
+	console.log(`[Admin] ${signal} received, shutting down gracefully...`);
+	app.stop();
+	await disconnectRedis();
+	await disconnectScylla();
+	console.log(`[Admin] Shutdown complete`);
+	process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

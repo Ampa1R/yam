@@ -10,11 +10,23 @@ export const redis = new Redis(redisUrl, {
 	lazyConnect: true,
 });
 
+redis.on("error", (err) => {
+	console.error("[Redis] Connection error:", err.message);
+});
+
+redis.on("reconnecting", (ms: number) => {
+	console.log(`[Redis] Reconnecting in ${ms}ms...`);
+});
+
 export function createRedisSubscriber(): Redis {
-	return new Redis(redisUrl, {
+	const sub = new Redis(redisUrl, {
 		maxRetriesPerRequest: null,
 		lazyConnect: true,
 	});
+	sub.on("error", (err) => {
+		console.error("[Redis:Sub] Connection error:", err.message);
+	});
+	return sub;
 }
 
 export async function connectRedis(): Promise<void> {

@@ -1,36 +1,117 @@
+import { and, db, eq, schema } from "@yam/db/pg";
 import { publishToUsers, queues, rateLimit } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
 import type {
+	Attachment,
 	DeleteMessagePayload,
 	EditMessagePayload,
 	SendMessagePayload,
 	ServerEvent,
 } from "@yam/shared";
-import { Limits } from "@yam/shared";
+import { Limits, MessageType } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
 
-export async function handleSendMessage(userId: string, data: SendMessagePayload): Promise<void> {
+function sendError(userId: string, code: string, message: string): void {
+	connectionManager.sendToUser(userId, {
+		event: "error",
+		data: { code, message },
+	});
+}
+
+function isValidSendPayload(data: unknown): data is SendMessagePayload {
+	if (!data || typeof data !== "object") return false;
+	const d = data as Record<string, unknown>;
+	return (
+		typeof d.chatId === "string" &&
+		d.chatId.length > 0 &&
+		typeof d.type === "number" &&
+		typeof d.content === "string" &&
+		typeof d.clientId === "string" &&
+		d.clientId.length > 0
+	);
+}
+
+function isValidEditPayload(data: unknown): data is EditMessagePayload {
+	if (!data || typeof data !== "object") return false;
+	const d = data as Record<string, unknown>;
+	return (
+		typeof d.messageId === "string" &&
+		d.messageId.length > 0 &&
+		typeof d.chatId === "string" &&
+		d.chatId.length > 0 &&
+		typeof d.content === "string"
+	);
+}
+
+function isValidDeletePayload(data: unknown): data is DeleteMessagePayload {
+	if (!data || typeof data !== "object") return false;
+	const d = data as Record<string, unknown>;
+	return (
+		typeof d.messageId === "string" &&
+		d.messageId.length > 0 &&
+		typeof d.chatId === "string" &&
+		d.chatId.length > 0
+	);
+}
+
+export async function handleSendMessage(userId: string, data: unknown): Promise<void> {
+	if (!isValidSendPayload(data)) {
+		sendError(userId, "INVALID_PAYLOAD", "Invalid message:send payload");
+		return;
+	}
+
+	if (data.content.length > Limits.MAX_MESSAGE_LENGTH) {
+		sendError(userId, "MESSAGE_TOO_LONG", `Message exceeds ${Limits.MAX_MESSAGE_LENGTH} characters`);
+		return;
+	}
+
+	if (data.type < MessageType.TEXT || data.type > MessageType.SYSTEM) {
+		sendError(userId, "INVALID_TYPE", "Invalid message type");
+		return;
+	}
+
 	const allowed = await rateLimit.check(`${userId}:msg`, Limits.RATE_LIMIT_MESSAGES_PER_MIN, 60);
 	if (!allowed) {
-		connectionManager.sendToUser(userId, {
-			event: "error",
-			data: { code: "RATE_LIMITED", message: "Message rate limit exceeded" },
-		});
+		sendError(userId, "RATE_LIMITED", "Message rate limit exceeded");
 		return;
 	}
 
 	const memberIds = await getChatMemberIds(data.chatId);
 	if (!memberIds.includes(userId)) {
-		connectionManager.sendToUser(userId, {
-			event: "error",
-			data: { code: "FORBIDDEN", message: "Not a member of this chat" },
-		});
+		sendError(userId, "FORBIDDEN", "Not a member of this chat");
 		return;
 	}
 
-	const attachments = data.attachments?.map((a) => ({
-		type: a.type,
+	const [chat] = await db
+		.select({ type: schema.chats.type })
+		.from(schema.chats)
+		.where(eq(schema.chats.id, data.chatId))
+		.limit(1);
+
+	if (chat?.type === 0) {
+		const otherId = memberIds.find((id) => id !== userId);
+		if (otherId) {
+			const [blocked] = await db
+				.select()
+				.from(schema.blockedUsers)
+				.where(
+					and(
+						eq(schema.blockedUsers.userId, otherId),
+						eq(schema.blockedUsers.blockedId, userId),
+					),
+				)
+				.limit(1);
+
+			if (blocked) {
+				sendError(userId, "BLOCKED", "You cannot send messages to this user");
+				return;
+			}
+		}
+	}
+
+	const attachments: Attachment[] | undefined = data.attachments?.map((a) => ({
+		type: a.type as Attachment["type"],
 		url: a.url,
 		filename: a.filename ?? null,
 		size: a.size,
@@ -91,20 +172,44 @@ export async function handleSendMessage(userId: string, data: SendMessagePayload
 	});
 }
 
-export async function handleEditMessage(userId: string, data: EditMessagePayload): Promise<void> {
-	const now = new Date();
-	const bucket = now.getFullYear() * 100 + (now.getMonth() + 1);
+export async function handleEditMessage(userId: string, data: unknown): Promise<void> {
+	if (!isValidEditPayload(data)) {
+		sendError(userId, "INVALID_PAYLOAD", "Invalid message:edit payload");
+		return;
+	}
+
+	if (data.content.length > Limits.MAX_MESSAGE_LENGTH) {
+		sendError(userId, "MESSAGE_TOO_LONG", `Message exceeds ${Limits.MAX_MESSAGE_LENGTH} characters`);
+		return;
+	}
+
+	const bucket = scyllaQueries.bucketFromTimeuuid(data.messageId);
+
+	const existing = await scyllaQueries.getMessage(data.chatId, data.messageId, bucket);
+	if (!existing) {
+		sendError(userId, "NOT_FOUND", "Message not found");
+		return;
+	}
+	if (existing.senderId !== userId) {
+		sendError(userId, "FORBIDDEN", "You can only edit your own messages");
+		return;
+	}
+	if (existing.isDeleted) {
+		sendError(userId, "GONE", "Message has been deleted");
+		return;
+	}
 
 	await scyllaQueries.editMessage(data.chatId, data.messageId, bucket, data.content);
 
 	const memberIds = await getChatMemberIds(data.chatId);
+	const editedAt = new Date().toISOString();
 	const event: ServerEvent = {
 		event: "message:updated",
 		data: {
 			messageId: data.messageId,
 			chatId: data.chatId,
 			content: data.content,
-			editedAt: now.toISOString(),
+			editedAt,
 		},
 	};
 
@@ -119,12 +224,40 @@ export async function handleEditMessage(userId: string, data: EditMessagePayload
 	);
 }
 
-export async function handleDeleteMessage(
-	userId: string,
-	data: DeleteMessagePayload,
-): Promise<void> {
-	const now = new Date();
-	const bucket = now.getFullYear() * 100 + (now.getMonth() + 1);
+export async function handleDeleteMessage(userId: string, data: unknown): Promise<void> {
+	if (!isValidDeletePayload(data)) {
+		sendError(userId, "INVALID_PAYLOAD", "Invalid message:delete payload");
+		return;
+	}
+
+	const bucket = scyllaQueries.bucketFromTimeuuid(data.messageId);
+
+	const existing = await scyllaQueries.getMessage(data.chatId, data.messageId, bucket);
+	if (!existing) {
+		sendError(userId, "NOT_FOUND", "Message not found");
+		return;
+	}
+	if (existing.senderId !== userId) {
+		const memberIds = await getChatMemberIds(data.chatId);
+		if (!memberIds.includes(userId)) {
+			sendError(userId, "FORBIDDEN", "Not a member of this chat");
+			return;
+		}
+		const [membership] = await db
+			.select({ role: schema.chatMembers.role })
+			.from(schema.chatMembers)
+			.where(
+				and(
+					eq(schema.chatMembers.chatId, data.chatId),
+					eq(schema.chatMembers.userId, userId),
+				),
+			)
+			.limit(1);
+		if (!membership || membership.role < 1) {
+			sendError(userId, "FORBIDDEN", "You can only delete your own messages");
+			return;
+		}
+	}
 
 	await scyllaQueries.softDeleteMessage(data.chatId, data.messageId, bucket);
 

@@ -1,6 +1,7 @@
+import { env } from "@/env";
 import { useAuthStore } from "@/stores/auth";
 
-const API_BASE = "/api";
+let refreshPromise: Promise<boolean> | null = null;
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 	const token = localStorage.getItem("accessToken");
@@ -17,7 +18,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 		headers["Content-Type"] = "application/json";
 	}
 
-	const res = await fetch(`${API_BASE}${path}`, {
+	const res = await fetch(`${env.apiBase}${path}`, {
 		...options,
 		headers,
 	});
@@ -25,7 +26,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 	if (res.status === 401) {
 		const refreshed = await tryRefreshToken();
 		if (refreshed) {
-			return request(path, options);
+			const retryHeaders = { ...headers };
+			const newToken = localStorage.getItem("accessToken");
+			if (newToken) retryHeaders.Authorization = `Bearer ${newToken}`;
+			return request(path, { ...options, headers: retryHeaders });
 		}
 		useAuthStore.getState().logout();
 		window.location.href = "/login";
@@ -37,15 +41,26 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 		throw new Error(error.error || res.statusText);
 	}
 
+	if (res.status === 204) return undefined as T;
 	return res.json();
 }
 
 async function tryRefreshToken(): Promise<boolean> {
+	if (refreshPromise) return refreshPromise;
+
+	refreshPromise = doRefresh().finally(() => {
+		refreshPromise = null;
+	});
+
+	return refreshPromise;
+}
+
+async function doRefresh(): Promise<boolean> {
 	const refreshToken = localStorage.getItem("refreshToken");
 	if (!refreshToken) return false;
 
 	try {
-		const res = await fetch(`${API_BASE}/auth/refresh`, {
+		const res = await fetch(`${env.apiBase}/auth/refresh`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ refreshToken }),

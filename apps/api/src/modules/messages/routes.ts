@@ -1,7 +1,7 @@
 import { and, db, eq, schema } from "@yam/db/pg";
 import { chatMembersCache, publishToUsers, queues, rateLimit } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
-import type { ServerEvent } from "@yam/shared";
+import type { Attachment, ServerEvent } from "@yam/shared";
 import { Limits } from "@yam/shared";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
@@ -87,8 +87,8 @@ export const messagesRoutes = new Elysia({ prefix: "/chats/:chatId/messages" })
 				return { error: "Not a member of this chat" };
 			}
 
-			const attachments = body.attachments?.map((a) => ({
-				type: a.type,
+			const attachments: Attachment[] | undefined = body.attachments?.map((a) => ({
+				type: a.type as Attachment["type"],
 				url: a.url,
 				filename: a.filename ?? null,
 				size: a.size,

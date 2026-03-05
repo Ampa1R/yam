@@ -2,28 +2,30 @@ import { Client, mapping, types } from "cassandra-driver";
 
 const contactPoints = (process.env.SCYLLA_HOSTS ?? "localhost:9042").split(",");
 const keyspace = process.env.SCYLLA_KEYSPACE ?? "yam";
+const isProd = process.env.NODE_ENV === "production";
+const consistency = isProd ? types.consistencies.localQuorum : types.consistencies.localOne;
 
 export const scyllaClient = new Client({
 	contactPoints,
-	localDataCenter: "datacenter1",
+	localDataCenter: process.env.SCYLLA_DC ?? "datacenter1",
 	keyspace,
 	pooling: {
 		coreConnectionsPerHost: {
-			[types.distance.local]: 2,
+			[types.distance.local]: Number(process.env.SCYLLA_POOL_LOCAL) || 2,
 			[types.distance.remote]: 1,
 		},
 	},
 	queryOptions: {
-		consistency: types.consistencies.localQuorum,
+		consistency,
 		prepare: true,
 	},
 });
 
 export const scyllaBootstrapClient = new Client({
 	contactPoints,
-	localDataCenter: "datacenter1",
+	localDataCenter: process.env.SCYLLA_DC ?? "datacenter1",
 	queryOptions: {
-		consistency: types.consistencies.localQuorum,
+		consistency: types.consistencies.localOne,
 	},
 });
 

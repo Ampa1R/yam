@@ -1,7 +1,7 @@
 import type { InboxItem } from "@yam/shared";
 import { formatDistanceToNow } from "date-fns";
-import { LogOut, MessageSquare, Plus, Search, Users } from "lucide-react";
-import { useMemo, useState } from "react";
+import { LogOut, MessageSquare, Pin, PinOff, Plus, Search, Users } from "lucide-react";
+import { memo, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
@@ -9,7 +9,7 @@ import { ContactsDialog } from "./ContactsDialog";
 import { NewChatDialog } from "./NewChatDialog";
 import { ProfileDialog } from "./ProfileDialog";
 
-function getInboxDisplayName(item: InboxItem, _userId: string | undefined): string {
+function getInboxDisplayName(item: InboxItem): string {
 	if (item.chatName) return item.chatName;
 	return "Chat";
 }
@@ -20,7 +20,7 @@ function getMessagePreview(item: InboxItem): string {
 }
 
 export function ChatSidebar() {
-	const { inbox, activeChatId, setActiveChatId } = useChatStore();
+	const { inbox, activeChatId, setActiveChatId, togglePin } = useChatStore();
 	const { user, logout } = useAuthStore();
 	const [searchQuery, setSearchQuery] = useState("");
 	const [showNewChat, setShowNewChat] = useState(false);
@@ -30,18 +30,17 @@ export function ChatSidebar() {
 	const filteredInbox = useMemo(
 		() =>
 			inbox.filter((item) => {
-				const name = getInboxDisplayName(item, user?.id);
+				const name = getInboxDisplayName(item);
 				return name.toLowerCase().includes(searchQuery.toLowerCase());
 			}),
-		[inbox, searchQuery, user?.id],
+		[inbox, searchQuery],
 	);
-
-	const _totalUnread = inbox.reduce((sum, item) => sum + item.unreadCount, 0);
 
 	return (
 		<aside className="flex w-80 flex-col border-r border-border bg-surface lg:w-96">
 			<header className="flex items-center justify-between border-b border-border px-4 py-3">
 				<button
+					type="button"
 					onClick={() => setShowProfile(true)}
 					className="flex items-center gap-2 rounded-lg px-1 py-0.5 transition-colors hover:bg-surface-hover"
 				>
@@ -61,6 +60,7 @@ export function ChatSidebar() {
 				</button>
 				<div className="flex items-center gap-0.5">
 					<button
+						type="button"
 						onClick={() => setShowContacts(true)}
 						className="rounded-lg p-2 text-text-secondary hover:bg-surface-hover"
 						title="Contacts"
@@ -68,6 +68,7 @@ export function ChatSidebar() {
 						<Users size={18} />
 					</button>
 					<button
+						type="button"
 						onClick={() => setShowNewChat(true)}
 						className="rounded-lg p-2 text-text-secondary hover:bg-surface-hover"
 						title="New chat"
@@ -75,6 +76,7 @@ export function ChatSidebar() {
 						<Plus size={18} />
 					</button>
 					<button
+						type="button"
 						onClick={logout}
 						className="rounded-lg p-2 text-text-secondary hover:bg-surface-hover"
 						title="Logout"
@@ -86,7 +88,10 @@ export function ChatSidebar() {
 
 			<div className="px-3 py-2">
 				<div className="relative">
-					<Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+					<Search
+						size={16}
+						className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
+					/>
 					<input
 						type="text"
 						value={searchQuery}
@@ -107,6 +112,7 @@ export function ChatSidebar() {
 						<MessageSquare size={48} strokeWidth={1} />
 						<p className="mt-3 text-sm">No chats yet</p>
 						<button
+							type="button"
 							onClick={() => setShowNewChat(true)}
 							className="mt-3 text-sm text-primary hover:underline"
 						>
@@ -115,56 +121,13 @@ export function ChatSidebar() {
 					</div>
 				) : (
 					filteredInbox.map((item) => (
-						<button
+						<InboxEntry
 							key={item.chatId}
-							onClick={() => setActiveChatId(item.chatId)}
-							className={cn(
-								"flex w-full items-center gap-3 px-3 py-3 text-left transition-colors",
-								activeChatId === item.chatId ? "bg-primary/10" : "hover:bg-surface-hover",
-							)}
-						>
-							<div className="relative">
-								<div
-									className={cn(
-										"flex h-12 w-12 shrink-0 items-center justify-center rounded-full font-semibold",
-										item.chatType === 1
-											? "bg-success/20 text-success"
-											: "bg-primary/20 text-primary",
-									)}
-								>
-									{getInboxDisplayName(item, user?.id).charAt(0)?.toUpperCase() ?? "?"}
-								</div>
-								{item.chatType === 1 && (
-									<div className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-surface">
-										<Users size={10} className="text-text-muted" />
-									</div>
-								)}
-							</div>
-							<div className="min-w-0 flex-1">
-								<div className="flex items-center justify-between">
-									<span className="truncate font-medium text-text-primary">
-										{getInboxDisplayName(item, user?.id)}
-									</span>
-									{item.lastActivity && (
-										<span className="ml-2 shrink-0 text-xs text-text-muted">
-											{formatDistanceToNow(new Date(item.lastActivity), {
-												addSuffix: false,
-											})}
-										</span>
-									)}
-								</div>
-								<div className="flex items-center justify-between">
-									<span className="truncate text-sm text-text-secondary">
-										{getMessagePreview(item)}
-									</span>
-									{item.unreadCount > 0 && (
-										<span className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-xs font-medium text-white">
-											{item.unreadCount > 99 ? "99+" : item.unreadCount}
-										</span>
-									)}
-								</div>
-							</div>
-						</button>
+							item={item}
+							isActive={activeChatId === item.chatId}
+							onSelect={() => setActiveChatId(item.chatId)}
+							onTogglePin={() => togglePin(item.chatId)}
+						/>
 					))
 				)}
 			</div>
@@ -175,3 +138,89 @@ export function ChatSidebar() {
 		</aside>
 	);
 }
+
+const InboxEntry = memo(function InboxEntry({
+	item,
+	isActive,
+	onSelect,
+	onTogglePin,
+}: {
+	item: InboxItem;
+	isActive: boolean;
+	onSelect: () => void;
+	onTogglePin: () => void;
+}) {
+	const displayName = getInboxDisplayName(item);
+
+	return (
+		<div
+			className={cn(
+				"group flex w-full items-center gap-3 px-3 py-3 text-left transition-colors",
+				isActive ? "bg-primary/10" : "hover:bg-surface-hover",
+			)}
+		>
+			<button type="button" onClick={onSelect} className="flex min-w-0 flex-1 items-center gap-3">
+				<div className="relative">
+					<div
+						className={cn(
+							"flex h-12 w-12 shrink-0 items-center justify-center rounded-full font-semibold",
+							item.chatType === 1
+								? "bg-success/20 text-success"
+								: "bg-primary/20 text-primary",
+						)}
+					>
+						{displayName.charAt(0)?.toUpperCase() ?? "?"}
+					</div>
+					{item.chatType === 1 && (
+						<div className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-surface">
+							<Users size={10} className="text-text-muted" />
+						</div>
+					)}
+				</div>
+				<div className="min-w-0 flex-1">
+					<div className="flex items-center justify-between">
+						<span className="truncate font-medium text-text-primary">
+							{displayName}
+						</span>
+						{item.lastActivity && (
+							<span className="ml-2 shrink-0 text-xs text-text-muted">
+								{formatDistanceToNow(new Date(item.lastActivity), {
+									addSuffix: false,
+								})}
+							</span>
+						)}
+					</div>
+					<div className="flex items-center justify-between">
+						<span className="truncate text-sm text-text-secondary">
+							{getMessagePreview(item)}
+						</span>
+						{item.unreadCount > 0 && (
+							<span className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-xs font-medium text-white">
+								{item.unreadCount > 99 ? "99+" : item.unreadCount}
+							</span>
+						)}
+					</div>
+				</div>
+			</button>
+
+			<button
+				type="button"
+				onClick={(e) => {
+					e.stopPropagation();
+					onTogglePin();
+				}}
+				className={cn(
+					"shrink-0 rounded p-1 transition-opacity",
+					item.isPinned
+						? "text-primary opacity-100"
+						: "text-text-muted opacity-0 group-hover:opacity-100",
+					"hover:bg-surface-hover",
+				)}
+				title={item.isPinned ? "Unpin chat" : "Pin chat"}
+				aria-label={item.isPinned ? "Unpin chat" : "Pin chat"}
+			>
+				{item.isPinned ? <PinOff size={14} /> : <Pin size={14} />}
+			</button>
+		</div>
+	);
+});

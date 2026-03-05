@@ -48,7 +48,7 @@ export class StreamQueue<T = unknown> {
 
 	async add(data: T): Promise<string> {
 		const id = await redis.xadd(this.stream, "*", "data", JSON.stringify(data), "attempts", "0");
-		return id;
+		return id!;
 	}
 
 	async process(consumerId: string, handler: (job: StreamJob<T>) => Promise<void>): Promise<void> {
@@ -77,7 +77,7 @@ export class StreamQueue<T = unknown> {
 
 				if (!results) continue;
 
-				for (const [, messages] of results) {
+				for (const [, messages] of results as [string, [string, string[]][]][]) {
 					for (const [msgId, fields] of messages) {
 						const fieldMap = new Map<string, string>();
 						for (let i = 0; i < fields.length; i += 2) {

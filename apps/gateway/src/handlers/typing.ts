@@ -3,7 +3,15 @@ import type { ServerEvent, TypingPayload } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
 
-export async function handleTypingStart(userId: string, data: TypingPayload): Promise<void> {
+function isValidTypingPayload(data: unknown): data is TypingPayload {
+	if (!data || typeof data !== "object") return false;
+	const d = data as Record<string, unknown>;
+	return typeof d.chatId === "string" && d.chatId.length > 0;
+}
+
+export async function handleTypingStart(userId: string, data: unknown): Promise<void> {
+	if (!isValidTypingPayload(data)) return;
+
 	await typing.start(data.chatId, userId);
 
 	const memberIds = await getChatMemberIds(data.chatId);
@@ -23,7 +31,9 @@ export async function handleTypingStart(userId: string, data: TypingPayload): Pr
 	);
 }
 
-export async function handleTypingStop(userId: string, data: TypingPayload): Promise<void> {
+export async function handleTypingStop(userId: string, data: unknown): Promise<void> {
+	if (!isValidTypingPayload(data)) return;
+
 	await typing.stop(data.chatId, userId);
 
 	const memberIds = await getChatMemberIds(data.chatId);

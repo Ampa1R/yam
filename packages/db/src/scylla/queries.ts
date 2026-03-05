@@ -1,9 +1,14 @@
-import type { Attachment, InboxItem, Message } from "@yam/shared";
+import type { Attachment, InboxItem, Message, MessageType } from "@yam/shared";
 import { types } from "cassandra-driver";
 import { scyllaClient } from "./client";
 
 function currentBucket(): number {
 	const d = new Date();
+	return d.getFullYear() * 100 + (d.getMonth() + 1);
+}
+
+export function bucketFromTimeuuid(timeuuidStr: string): number {
+	const d = types.TimeUuid.fromString(timeuuidStr).getDate();
 	return d.getFullYear() * 100 + (d.getMonth() + 1);
 }
 
@@ -87,7 +92,7 @@ export async function insertMessage(params: {
 		chatId: params.chatId,
 		bucket,
 		senderId: params.senderId,
-		type: params.type,
+		type: params.type as MessageType,
 		content: params.content,
 		attachments: params.attachments ?? [],
 		mediaGroupId: params.mediaGroupId ?? null,
@@ -104,20 +109,21 @@ export async function getMessages(
 	limit: number = 50,
 	beforeId?: string,
 ): Promise<Message[]> {
-	const bucket = currentBucket();
 	const chatUuid = types.Uuid.fromString(chatId);
+	let currentBkt = beforeId ? bucketFromTimeuuid(beforeId) : currentBucket();
 
 	let messages: Message[] = [];
-	let currentBkt = bucket;
 	const maxBucketsToScan = 12;
+	let usedBeforeId = false;
 
 	for (let i = 0; i < maxBucketsToScan && messages.length < limit; i++) {
 		let query: string;
 		let queryParams: unknown[];
 
-		if (beforeId && i === 0) {
+		if (beforeId && !usedBeforeId) {
 			query = `SELECT * FROM messages WHERE chat_id = ? AND bucket = ? AND id < ? ORDER BY id DESC LIMIT ?`;
 			queryParams = [chatUuid, currentBkt, types.TimeUuid.fromString(beforeId), limit];
+			usedBeforeId = true;
 		} else {
 			query = `SELECT * FROM messages WHERE chat_id = ? AND bucket = ? ORDER BY id DESC LIMIT ?`;
 			queryParams = [chatUuid, currentBkt, limit - messages.length];
@@ -139,6 +145,20 @@ export async function getMessages(
 	}
 
 	return messages.slice(0, limit);
+}
+
+export async function getMessage(
+	chatId: string,
+	messageId: string,
+	bucket: number,
+): Promise<Message | null> {
+	const result = await scyllaClient.execute(
+		`SELECT * FROM messages WHERE chat_id = ? AND bucket = ? AND id = ? LIMIT 1`,
+		[types.Uuid.fromString(chatId), bucket, types.TimeUuid.fromString(messageId)],
+		{ prepare: true },
+	);
+	if (result.rows.length === 0) return null;
+	return rowToMessage(result.rows[0]!);
 }
 
 export async function editMessage(

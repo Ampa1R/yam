@@ -1,7 +1,7 @@
 import { and, db, eq, schema, sql } from "@yam/db/pg";
 import { chatMembersCache, directChatLookup } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
-import { ChatRole, ChatType, type InboxItem, Limits } from "@yam/shared";
+import { ChatRole, ChatType, type ChatType as ChatTypeT, type InboxItem, Limits } from "@yam/shared";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
 
@@ -329,7 +329,7 @@ export const chatsRoutes = new Elysia({ prefix: "/chats" })
 
 			await scyllaQueries.upsertInboxEntry(body.userId, {
 				chatId: params.id,
-				chatType: chat.type,
+				chatType: chat.type as ChatTypeT,
 				chatName: chat.name,
 				chatAvatar: chat.avatarUrl,
 				otherUserId: null,

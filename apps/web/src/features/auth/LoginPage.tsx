@@ -1,8 +1,11 @@
-import { useState } from "react";
+import type { AuthTokens, User } from "@yam/shared";
+import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useAuthStore } from "@/stores/auth";
+
+const PHONE_REGEX = /^\+\d{10,15}$/;
 
 export function LoginPage() {
 	const [step, setStep] = useState<"phone" | "otp">("phone");
@@ -13,9 +16,23 @@ export function LoginPage() {
 	const navigate = useNavigate();
 	const { setUser, setTokens } = useAuthStore();
 
+	const handlePhoneChange = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) => {
+			const value = e.target.value.replace(/[^\d+]/g, "");
+			if (value.length <= 16) setPhone(value);
+		},
+		[],
+	);
+
 	const handleRequestOtp = async (e: React.FormEvent) => {
 		e.preventDefault();
 		setError("");
+
+		if (!PHONE_REGEX.test(phone)) {
+			setError("Enter a valid phone number (e.g. +79001234567)");
+			return;
+		}
+
 		setLoading(true);
 		try {
 			await api.post("/auth/request-otp", { phone });
@@ -30,13 +47,18 @@ export function LoginPage() {
 	const handleVerifyOtp = async (e: React.FormEvent) => {
 		e.preventDefault();
 		setError("");
+
+		if (code.length !== 6) {
+			setError("Code must be 6 digits");
+			return;
+		}
+
 		setLoading(true);
 		try {
-			const res = await api.post<{
-				accessToken: string;
-				refreshToken: string;
-				user: any;
-			}>("/auth/verify-otp", { phone, code });
+			const res = await api.post<AuthTokens & { user: User }>("/auth/verify-otp", {
+				phone,
+				code,
+			});
 			setTokens(res.accessToken, res.refreshToken);
 			setUser(res.user);
 			navigate("/");
@@ -52,19 +74,27 @@ export function LoginPage() {
 			<div className="w-full max-w-sm rounded-2xl bg-surface p-8 shadow-lg">
 				<div className="mb-8 text-center">
 					<h1 className="text-3xl font-bold text-primary">YAM</h1>
-					<p className="mt-2 text-sm text-text-secondary">Yet Another Messenger</p>
+					<p className="mt-2 text-sm text-text-secondary">
+						Yet Another Messenger
+					</p>
 				</div>
 
 				{step === "phone" ? (
 					<form onSubmit={handleRequestOtp} className="space-y-4">
 						<div>
-							<label className="mb-1 block text-sm font-medium text-text-secondary">
+							<label
+								htmlFor="phone-input"
+								className="mb-1 block text-sm font-medium text-text-secondary"
+							>
 								Phone Number
 							</label>
 							<input
+								id="phone-input"
 								type="tel"
+								inputMode="tel"
+								autoComplete="tel"
 								value={phone}
-								onChange={(e) => setPhone(e.target.value)}
+								onChange={handlePhoneChange}
 								placeholder="+79001234567"
 								className={cn(
 									"w-full rounded-lg border border-border bg-surface px-4 py-3",
@@ -74,7 +104,11 @@ export function LoginPage() {
 								required
 							/>
 						</div>
-						{error && <p className="text-sm text-danger">{error}</p>}
+						{error && (
+							<p className="text-sm text-danger" role="alert">
+								{error}
+							</p>
+						)}
 						<button
 							type="submit"
 							disabled={loading}
@@ -93,13 +127,22 @@ export function LoginPage() {
 				) : (
 					<form onSubmit={handleVerifyOtp} className="space-y-4">
 						<div>
-							<label className="mb-1 block text-sm font-medium text-text-secondary">
+							<label
+								htmlFor="otp-input"
+								className="mb-1 block text-sm font-medium text-text-secondary"
+							>
 								Verification Code
 							</label>
 							<input
+								id="otp-input"
 								type="text"
+								inputMode="numeric"
+								autoComplete="one-time-code"
 								value={code}
-								onChange={(e) => setCode(e.target.value)}
+								onChange={(e) => {
+									const v = e.target.value.replace(/\D/g, "");
+									if (v.length <= 6) setCode(v);
+								}}
 								placeholder="000000"
 								maxLength={6}
 								className={cn(
@@ -110,7 +153,11 @@ export function LoginPage() {
 								required
 							/>
 						</div>
-						{error && <p className="text-sm text-danger">{error}</p>}
+						{error && (
+							<p className="text-sm text-danger" role="alert">
+								{error}
+							</p>
+						)}
 						<button
 							type="submit"
 							disabled={loading}

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { connectRedis, queues } from "@yam/db/redis";
-import { connectScylla } from "@yam/db/scylla";
+import { connectRedis, disconnectRedis, queues } from "@yam/db/redis";
+import { connectScylla, disconnectScylla } from "@yam/db/scylla";
 import { startCronJobs } from "./crons/cleanup";
 import { processFile } from "./jobs/file-process";
 import { processInboxFanout } from "./jobs/inbox-fanout";
@@ -26,10 +26,16 @@ startCronJobs();
 
 console.log(`[Worker] ${WORKER_ID} running, consuming queues...`);
 
-process.on("SIGINT", () => {
-	console.log(`[Worker] ${WORKER_ID} shutting down...`);
+async function gracefulShutdown(signal: string) {
+	console.log(`[Worker] ${WORKER_ID} ${signal} received, shutting down...`);
 	queues.inboxFanout.stop();
 	queues.fileProcess.stop();
 	queues.pushSend.stop();
+	await disconnectRedis();
+	await disconnectScylla();
+	console.log(`[Worker] Shutdown complete`);
 	process.exit(0);
-});
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

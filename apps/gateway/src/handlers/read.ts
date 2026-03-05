@@ -6,7 +6,20 @@ import { MessageStatus } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
 
-export async function handleReadMessage(userId: string, data: ReadMessagePayload): Promise<void> {
+function isValidReadPayload(data: unknown): data is ReadMessagePayload {
+	if (!data || typeof data !== "object") return false;
+	const d = data as Record<string, unknown>;
+	return (
+		typeof d.chatId === "string" &&
+		d.chatId.length > 0 &&
+		typeof d.messageId === "string" &&
+		d.messageId.length > 0
+	);
+}
+
+export async function handleReadMessage(userId: string, data: unknown): Promise<void> {
+	if (!isValidReadPayload(data)) return;
+
 	const memberIds = await getChatMemberIds(data.chatId);
 	if (!memberIds.includes(userId)) return;
 

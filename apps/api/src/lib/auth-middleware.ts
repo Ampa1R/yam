@@ -29,4 +29,5 @@ export const authMiddleware = new Elysia({ name: "auth" })
 				},
 			};
 		},
-	});
+	})
+	.as("global");
