@@ -1,0 +1,34 @@
+{
+	"name": "@yam/db",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": "./src/index.ts",
+		"./pg": "./src/pg/index.ts",
+		"./pg/schema": "./src/pg/schema.ts",
+		"./scylla": "./src/scylla/index.ts",
+		"./redis": "./src/redis/index.ts"
+	},
+	"scripts": {
+		"build": "bun build ./src/index.ts --outdir ./dist --target bun",
+		"lint": "biome check src/",
+		"db:generate": "drizzle-kit generate",
+		"db:migrate": "bun run src/pg/migrate.ts",
+		"db:studio": "drizzle-kit studio"
+	},
+	"dependencies": {
+		"drizzle-orm": "latest",
+		"postgres": "latest",
+		"ioredis": "latest",
+		"cassandra-driver": "latest",
+		"@yam/shared": "workspace:*"
+	},
+	"devDependencies": {
+		"drizzle-kit": "latest",
+		"bun-types": "latest",
+		"typescript": "latest"
+	}
+}

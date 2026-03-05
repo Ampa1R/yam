@@ -1,0 +1,21 @@
+{
+	"name": "@yam/gateway",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "bun run --watch src/index.ts",
+		"build": "bun build ./src/index.ts --outdir ./dist --target bun",
+		"start": "bun run dist/index.js",
+		"lint": "biome check src/"
+	},
+	"dependencies": {
+		"elysia": "latest",
+		"@yam/shared": "workspace:*",
+		"@yam/db": "workspace:*"
+	},
+	"devDependencies": {
+		"bun-types": "latest",
+		"typescript": "latest"
+	}
+}

@@ -1,0 +1,25 @@
+{
+	"name": "yam",
+	"private": true,
+	"workspaces": [
+		"apps/*",
+		"packages/*"
+	],
+	"scripts": {
+		"dev": "turbo dev",
+		"build": "turbo build",
+		"lint": "turbo lint",
+		"format": "biome format --write .",
+		"check": "biome check --write .",
+		"db:migrate": "turbo db:migrate",
+		"db:generate": "turbo db:generate",
+		"docker:up": "docker compose -f docker/docker-compose.yml up -d",
+		"docker:down": "docker compose -f docker/docker-compose.yml down",
+		"docker:logs": "docker compose -f docker/docker-compose.yml logs -f"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "latest",
+		"turbo": "latest",
+		"typescript": "latest"
+	}
+}

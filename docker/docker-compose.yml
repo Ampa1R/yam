@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: yam-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: yam
+      POSTGRES_PASSWORD: yam_dev
+      POSTGRES_DB: yam
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/pg-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yam"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  scylla:
+    image: scylladb/scylla:6.2
+    container_name: yam-scylla
+    restart: unless-stopped
+    ports:
+      - "9042:9042"
+    command: --smp 2 --memory 1G --overprovisioned 1 --developer-mode 1
+    volumes:
+      - scylla_data:/var/lib/scylla
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: yam-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  imgproxy:
+    image: darthsim/imgproxy:latest
+    container_name: yam-imgproxy
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      IMGPROXY_BIND: ":8080"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /uploads
+      IMGPROXY_ALLOWED_SOURCES: "local://"
+      IMGPROXY_MAX_SRC_RESOLUTION: 50
+      IMGPROXY_JPEG_PROGRESSIVE: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: "true"
+      IMGPROXY_ENABLE_AVIF_DETECTION: "true"
+      IMGPROXY_ENFORCE_WEBP: "true"
+    volumes:
+      - uploads_data:/uploads
+
+volumes:
+  postgres_data:
+  scylla_data:
+  redis_data:
+  uploads_data:
