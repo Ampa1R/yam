@@ -390,6 +390,124 @@ export const chatsRoutes = new Elysia({ prefix: "/chats" })
 		},
 	)
 	.patch(
+		"/:id/members/:memberId/role",
+		async ({ params, body, userId, set }) => {
+			if (!userId) {
+				set.status = 401;
+				return { error: "Unauthorized" };
+			}
+
+			const [myMembership] = await db
+				.select()
+				.from(schema.chatMembers)
+				.where(and(eq(schema.chatMembers.chatId, params.id), eq(schema.chatMembers.userId, userId)))
+				.limit(1);
+
+			if (!myMembership || myMembership.role < ChatRole.OWNER) {
+				set.status = 403;
+				return { error: "Only the owner can change member roles" };
+			}
+
+			if (body.role >= ChatRole.OWNER) {
+				set.status = 400;
+				return { error: "Cannot assign owner role directly — use transfer endpoint" };
+			}
+
+			const [targetMembership] = await db
+				.select()
+				.from(schema.chatMembers)
+				.where(
+					and(
+						eq(schema.chatMembers.chatId, params.id),
+						eq(schema.chatMembers.userId, params.memberId),
+					),
+				)
+				.limit(1);
+
+			if (!targetMembership) {
+				set.status = 404;
+				return { error: "Member not found in this chat" };
+			}
+
+			await db
+				.update(schema.chatMembers)
+				.set({ role: body.role })
+				.where(
+					and(
+						eq(schema.chatMembers.chatId, params.id),
+						eq(schema.chatMembers.userId, params.memberId),
+					),
+				);
+
+			return { success: true };
+		},
+		{
+			requireAuth: true,
+			params: t.Object({ id: t.String(), memberId: t.String() }),
+			body: t.Object({ role: t.Number() }),
+		},
+	)
+	.post(
+		"/:id/transfer",
+		async ({ params, body, userId, set }) => {
+			if (!userId) {
+				set.status = 401;
+				return { error: "Unauthorized" };
+			}
+
+			const [myMembership] = await db
+				.select()
+				.from(schema.chatMembers)
+				.where(and(eq(schema.chatMembers.chatId, params.id), eq(schema.chatMembers.userId, userId)))
+				.limit(1);
+
+			if (!myMembership || myMembership.role < ChatRole.OWNER) {
+				set.status = 403;
+				return { error: "Only the owner can transfer ownership" };
+			}
+
+			const [targetMembership] = await db
+				.select()
+				.from(schema.chatMembers)
+				.where(
+					and(
+						eq(schema.chatMembers.chatId, params.id),
+						eq(schema.chatMembers.userId, body.userId),
+					),
+				)
+				.limit(1);
+
+			if (!targetMembership) {
+				set.status = 404;
+				return { error: "Target user is not a member of this chat" };
+			}
+
+			await db
+				.update(schema.chatMembers)
+				.set({ role: ChatRole.OWNER })
+				.where(
+					and(
+						eq(schema.chatMembers.chatId, params.id),
+						eq(schema.chatMembers.userId, body.userId),
+					),
+				);
+
+			await db
+				.update(schema.chatMembers)
+				.set({ role: ChatRole.ADMIN })
+				.where(
+					and(eq(schema.chatMembers.chatId, params.id), eq(schema.chatMembers.userId, userId)),
+				);
+
+			return { success: true };
+		},
+		{
+			requireAuth: true,
+			params: t.Object({ id: t.String() }),
+			body: t.Object({ userId: t.String() }),
+		},
+	)
+	.patch(
 		"/:id/pin",
 		async ({ params, body, userId, set }) => {
 			if (!userId) {

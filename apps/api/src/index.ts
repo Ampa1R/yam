@@ -2,6 +2,7 @@ import { cors } from "@elysiajs/cors";
 import { connectRedis, disconnectRedis } from "@yam/db/redis";
 import { connectScylla, disconnectScylla } from "@yam/db/scylla";
 import { Elysia } from "elysia";
+import { AppError } from "./lib/errors";
 import { authRoutes } from "./modules/auth/routes";
 import { chatsRoutes } from "./modules/chats/routes";
 import { contactsRoutes } from "./modules/contacts/routes";
@@ -23,6 +24,15 @@ const app = new Elysia()
 				: undefined,
 		),
 	)
+	.onError(({ error, set }) => {
+		if (error instanceof AppError) {
+			set.status = error.statusCode;
+			return { error: error.message, code: error.code };
+		}
+		console.error("[API] Unhandled error:", error);
+		set.status = 500;
+		return { error: "Internal server error", code: "INTERNAL_ERROR" };
+	})
 	.get("/health", () => ({ status: "ok", service: "api", timestamp: new Date().toISOString() }))
 	.group("/api", (app) =>
 		app

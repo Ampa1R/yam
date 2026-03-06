@@ -20,7 +20,6 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 	if (!chat) return;
 
 	const now = new Date().toISOString();
-	const recipientsForEvent: string[] = [];
 
 	for (const memberId of memberIds) {
 		const isSender = memberId === senderId;
@@ -58,7 +57,6 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 
 		if (!isSender) {
 			const newCount = await unread.increment(memberId, chatId);
-			recipientsForEvent.push(memberId);
 
 			const chatUpdatedEvent: ServerEvent = {
 				event: "chat:updated",

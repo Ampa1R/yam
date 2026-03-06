@@ -30,12 +30,14 @@ export const scyllaBootstrapClient = new Client({
 });
 
 export async function connectScylla(): Promise<void> {
-	await scyllaBootstrapClient.connect();
-	await scyllaBootstrapClient.execute(`
-		CREATE KEYSPACE IF NOT EXISTS ${keyspace}
-		WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
-	`);
-	await scyllaBootstrapClient.shutdown();
+	if (!isProd) {
+		await scyllaBootstrapClient.connect();
+		await scyllaBootstrapClient.execute(`
+			CREATE KEYSPACE IF NOT EXISTS ${keyspace}
+			WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
+		`);
+		await scyllaBootstrapClient.shutdown();
+	}
 	await scyllaClient.connect();
 	console.log("[ScyllaDB] Connected to keyspace:", keyspace);
 }

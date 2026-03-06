@@ -12,9 +12,10 @@ function isValidTypingPayload(data: unknown): data is TypingPayload {
 export async function handleTypingStart(userId: string, data: unknown): Promise<void> {
 	if (!isValidTypingPayload(data)) return;
 
-	await typing.start(data.chatId, userId);
-
 	const memberIds = await getChatMemberIds(data.chatId);
+	if (!memberIds.includes(userId)) return;
+
+	await typing.start(data.chatId, userId);
 	const event: ServerEvent = {
 		event: "typing",
 		data: { chatId: data.chatId, userId, isTyping: true },
@@ -34,9 +35,10 @@ export async function handleTypingStart(userId: string, data: unknown): Promise<
 export async function handleTypingStop(userId: string, data: unknown): Promise<void> {
 	if (!isValidTypingPayload(data)) return;
 
-	await typing.stop(data.chatId, userId);
-
 	const memberIds = await getChatMemberIds(data.chatId);
+	if (!memberIds.includes(userId)) return;
+
+	await typing.stop(data.chatId, userId);
 	const event: ServerEvent = {
 		event: "typing",
 		data: { chatId: data.chatId, userId, isTyping: false },

@@ -87,6 +87,32 @@ export const messagesRoutes = new Elysia({ prefix: "/chats/:chatId/messages" })
 				return { error: "Not a member of this chat" };
 			}
 
+			const [chat] = await db
+				.select({ type: schema.chats.type })
+				.from(schema.chats)
+				.where(eq(schema.chats.id, params.chatId))
+				.limit(1);
+
+			if (chat?.type === 0) {
+				const otherId = memberIds.find((id) => id !== userId);
+				if (otherId) {
+					const [blocked] = await db
+						.select()
+						.from(schema.blockedUsers)
+						.where(
+							and(
+								eq(schema.blockedUsers.userId, otherId),
+								eq(schema.blockedUsers.blockedId, userId),
+							),
+						)
+						.limit(1);
+					if (blocked) {
+						set.status = 403;
+						return { error: "You cannot send messages to this user" };
+					}
+				}
+			}
+
 			const attachments: Attachment[] | undefined = body.attachments?.map((a) => ({
 				type: a.type as Attachment["type"],
 				url: a.url,
