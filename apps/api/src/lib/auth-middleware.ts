@@ -21,10 +21,14 @@ export const authMiddleware = new Elysia({ name: "auth" })
 		requireAuth(enabled: boolean) {
 			if (!enabled) return;
 			return {
-				beforeHandle({ userId, set }) {
+				beforeHandle({ userId, userRole, set }) {
 					if (!userId) {
 						set.status = 401;
 						return { error: "Unauthorized" };
+					}
+					if (userRole != null && userRole < 0) {
+						set.status = 403;
+						return { error: "Account suspended" };
 					}
 				},
 			};

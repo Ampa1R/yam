@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { connectRedis, createPubSubManager, disconnectRedis, presence, userConnections } from "@yam/db/redis";
+import { connectRedis, createPubSubManager, disconnectRedis, presence, publishToUsers, userConnections } from "@yam/db/redis";
 import { connectScylla, disconnectScylla } from "@yam/db/scylla";
-import type { ClientEvent } from "@yam/shared";
+import type { ClientEvent, ServerEvent } from "@yam/shared";
 import { Elysia } from "elysia";
 import { connectionManager, type WsData } from "./connection/manager";
 import { handleDeleteMessage, handleEditMessage, handleSendMessage } from "./handlers/message";
 import { handleReadMessage } from "./handlers/read";
 import { handleTypingStart, handleTypingStop } from "./handlers/typing";
+import { getContactUserIds } from "./lib/chat-members";
 import { verifyAccessToken } from "@yam/shared/jwt";
 
 const port = Number(process.env.GATEWAY_PORT ?? 3001);
@@ -69,6 +70,17 @@ const app = new Elysia()
 				return;
 			}
 
+			if (payload.role < 0) {
+				ws.send(
+					JSON.stringify({
+						event: "error",
+						data: { code: "ACCOUNT_SUSPENDED", message: "Account suspended" },
+					}),
+				);
+				ws.close();
+				return;
+			}
+
 			const userId = payload.sub;
 			const connId = randomUUID();
 			(ws.data as unknown as WsData).userId = userId;
@@ -83,6 +95,20 @@ const app = new Elysia()
 			console.log(
 				`[GW] ${userId} connected (conn: ${connId}, total: ${connectionManager.getConnectionCount()})`,
 			);
+
+			getContactUserIds(userId)
+				.then((contactIds) => {
+					if (contactIds.length === 0) return;
+					const event: ServerEvent = {
+						event: "presence",
+						data: { userId, status: "online", lastSeen: null },
+					};
+					const local = contactIds.filter((id) => connectionManager.isLocal(id));
+					const remote = contactIds.filter((id) => !connectionManager.isLocal(id));
+					connectionManager.sendToUsers(local, event);
+					if (remote.length > 0) publishToUsers(remote, event);
+				})
+				.catch(() => {});
 		},
 
 		async message(ws, rawMessage) {
@@ -170,6 +196,21 @@ const app = new Elysia()
 				await pubsub.unsubscribe(userId);
 				await presence.setOffline(userId);
 				await userConnections.remove(userId, INSTANCE_ID);
+
+				const lastSeen = new Date().toISOString();
+				getContactUserIds(userId)
+					.then((contactIds) => {
+						if (contactIds.length === 0) return;
+						const event: ServerEvent = {
+							event: "presence",
+							data: { userId, status: "offline", lastSeen },
+						};
+						const local = contactIds.filter((id) => connectionManager.isLocal(id));
+						const remote = contactIds.filter((id) => !connectionManager.isLocal(id));
+						connectionManager.sendToUsers(local, event);
+						if (remote.length > 0) publishToUsers(remote, event);
+					})
+					.catch(() => {});
 			}
 
 			console.log(`[GW] ${userId} disconnected (total: ${connectionManager.getConnectionCount()})`);

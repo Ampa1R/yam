@@ -9,6 +9,27 @@ import { authMiddleware } from "../../lib/auth-middleware";
 const STORAGE_PATH = process.env.STORAGE_LOCAL_PATH ?? "./uploads";
 const MAX_FILE_SIZE = (Number(process.env.MAX_FILE_SIZE_MB) || 50) * 1024 * 1024;
 
+const ALLOWED_MIME_PREFIXES = ["image/", "audio/", "video/"];
+const ALLOWED_MIME_TYPES = new Set([
+	"application/pdf",
+	"application/zip",
+	"application/x-zip-compressed",
+	"text/plain",
+	"text/csv",
+	"application/json",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	"application/msword",
+	"application/vnd.ms-excel",
+	"application/vnd.ms-powerpoint",
+]);
+
+function isAllowedMimeType(mime: string): boolean {
+	if (ALLOWED_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) return true;
+	return ALLOWED_MIME_TYPES.has(mime);
+}
+
 export const filesRoutes = new Elysia({ prefix: "/files" })
 	.use(authMiddleware)
 	.post(
@@ -20,6 +41,11 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 			}
 
 			const { file } = body;
+
+			if (!isAllowedMimeType(file.type)) {
+				set.status = 400;
+				return { error: "File type not allowed" };
+			}
 
 			if (file.size > MAX_FILE_SIZE) {
 				set.status = 400;
@@ -107,8 +133,9 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 				return { error: "File not found on disk" };
 			}
 
+			const safeName = file.filename.replace(/[^\w.\-]/g, "_");
 			set.headers["content-type"] = file.mimeType;
-			set.headers["content-disposition"] = `inline; filename="${file.filename}"`;
+			set.headers["content-disposition"] = `inline; filename="${safeName}"`;
 			set.headers["cache-control"] = "public, max-age=31536000, immutable";
 
 			return bunFile;

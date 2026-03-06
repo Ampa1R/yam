@@ -159,13 +159,13 @@ otp_attempts:{phone} = count                TTL 3600s
 
 # Presence
 presence:{userId} = "online"                TTL 30s (heartbeat)
-last_seen:{userId} = timestamp              no TTL
+last_seen:{userId} = timestamp              TTL 30d
 
 # Typing
 typing:{chatId}:{userId} = "1"             TTL 3s
 
 # Unread
-unread:{userId}:{chatId} = count            no TTL
+unread:{userId}:{chatId} = count            TTL 30d
 
 # Cache
 chat:members:{chatId} = SET[userIds]        TTL 300s

@@ -54,7 +54,8 @@ const app = new Elysia()
 					const limit = Math.min(Number(query.limit) || 50, 100);
 					const offset = (page - 1) * limit;
 
-					const filter = query.q ? ilike(schema.users.displayName, `%${query.q}%`) : undefined;
+					const escapedQ = query.q?.replace(/[%_\\]/g, "\\$&");
+					const filter = escapedQ ? ilike(schema.users.displayName, `%${escapedQ}%`) : undefined;
 
 					const users = await db
 						.select()

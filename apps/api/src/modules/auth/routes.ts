@@ -152,6 +152,12 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 				return { error: "User not found" };
 			}
 
+			if (user.role < 0) {
+				await db.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, user.id));
+				set.status = 403;
+				return { error: "Account suspended" };
+			}
+
 			const newAccessToken = await createAccessToken(user.id, user.role);
 			const newRefreshToken = await createRefreshToken(user.id, user.role);
 			const newTokenHash = await hashToken(newRefreshToken);

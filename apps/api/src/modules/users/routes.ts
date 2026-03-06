@@ -82,7 +82,7 @@ export const usersRoutes = new Elysia({ prefix: "/users" })
 			requireAuth: true,
 			body: t.Object({
 				displayName: t.Optional(t.String({ minLength: 1, maxLength: 100 })),
-				username: t.Optional(t.String({ minLength: 3, maxLength: 50 })),
+				username: t.Optional(t.String({ minLength: 3, maxLength: 50, pattern: "^[a-zA-Z0-9_]+$" })),
 				avatarUrl: t.Optional(t.Nullable(t.String())),
 				statusText: t.Optional(t.Nullable(t.String({ maxLength: 200 }))),
 				isProfilePublic: t.Optional(t.Boolean()),
@@ -100,6 +100,8 @@ export const usersRoutes = new Elysia({ prefix: "/users" })
 			const { q } = query;
 			if (!q || q.length < 2) return { users: [] };
 
+			const escapedQ = q.replace(/[%_\\]/g, "\\$&");
+
 			const results = await db
 				.select({
 					id: schema.users.id,
@@ -112,8 +114,8 @@ export const usersRoutes = new Elysia({ prefix: "/users" })
 					and(
 						sql`${schema.users.id} != ${userId}`,
 						or(
-							ilike(schema.users.displayName, `%${q}%`),
-							ilike(schema.users.username, `%${q}%`),
+							ilike(schema.users.displayName, `%${escapedQ}%`),
+							ilike(schema.users.username, `%${escapedQ}%`),
 							eq(schema.users.phone, q),
 						),
 					),

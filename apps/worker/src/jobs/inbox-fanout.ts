@@ -1,8 +1,8 @@
 import { db, eq, schema } from "@yam/db/pg";
 import type { StreamJob } from "@yam/db/redis";
-import { unread } from "@yam/db/redis";
+import { publishToUsers, unread } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
-import type { ChatType } from "@yam/shared";
+import type { ChatType, ServerEvent } from "@yam/shared";
 
 interface InboxFanoutPayload {
 	chatId: string;
@@ -20,6 +20,7 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 	if (!chat) return;
 
 	const now = new Date().toISOString();
+	const recipientsForEvent: string[] = [];
 
 	for (const memberId of memberIds) {
 		const isSender = memberId === senderId;
@@ -56,7 +57,23 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 		);
 
 		if (!isSender) {
-			await unread.increment(memberId, chatId);
+			const newCount = await unread.increment(memberId, chatId);
+			recipientsForEvent.push(memberId);
+
+			const chatUpdatedEvent: ServerEvent = {
+				event: "chat:updated",
+				data: {
+					chatId,
+					lastMessage: {
+						senderId,
+						type: messageType,
+						preview: messagePreview,
+						createdAt: now,
+					},
+					unreadCount: newCount,
+				},
+			};
+			await publishToUsers([memberId], chatUpdatedEvent);
 		}
 	}
 }

@@ -68,9 +68,14 @@ export const typing = {
 	},
 };
 
+const UNREAD_TTL = 30 * 24 * 3600; // 30 days
+
 export const unread = {
 	async increment(userId: string, chatId: string): Promise<number> {
-		return redis.incr(`${UNREAD_PREFIX}${userId}:${chatId}`);
+		const key = `${UNREAD_PREFIX}${userId}:${chatId}`;
+		const count = await redis.incr(key);
+		await redis.expire(key, UNREAD_TTL);
+		return count;
 	},
 
 	async reset(userId: string, chatId: string): Promise<void> {
