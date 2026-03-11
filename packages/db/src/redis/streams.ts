@@ -18,7 +18,7 @@ const DEFAULT_OPTIONS: Required<StreamQueueOptions> = {
 	maxRetries: 3,
 	claimIntervalMs: 30_000,
 	claimTimeoutMs: 60_000,
-	blockTimeoutMs: 5_000,
+	blockTimeoutMs: 2_000,
 	batchSize: 10,
 };
 
@@ -77,44 +77,35 @@ export class StreamQueue<T = unknown> {
 
 				if (!results) continue;
 
+				const jobs: { id: string; job: StreamJob<T> }[] = [];
 				for (const [, messages] of results as [string, [string, string[]][]][]) {
 					for (const [msgId, fields] of messages) {
 						const fieldMap = new Map<string, string>();
 						for (let i = 0; i < fields.length; i += 2) {
 							fieldMap.set(fields[i]!, fields[i + 1]!);
 						}
-
-						const job: StreamJob<T> = {
+						jobs.push({
 							id: msgId,
-							data: JSON.parse(fieldMap.get("data") ?? "null") as T,
-							attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10),
-						};
+							job: {
+								id: msgId,
+								data: JSON.parse(fieldMap.get("data") ?? "null") as T,
+								attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10),
+							},
+						});
+					}
+				}
 
+				await Promise.all(
+					jobs.map(async ({ id: msgId, job }) => {
 						try {
 							await handler(job);
 							await redis.xack(this.stream, this.group, msgId);
 						} catch (err) {
 							console.error(`[StreamQueue:${this.stream}] Job ${msgId} failed:`, err);
-							const newAttempts = job.attempts + 1;
-							if (newAttempts >= this.opts.maxRetries) {
-								await redis.xadd(
-									this.dlq,
-									"*",
-									"data",
-									JSON.stringify(job.data),
-									"original_id",
-									msgId,
-									"error",
-									err instanceof Error ? err.message : String(err),
-								);
-								await redis.xack(this.stream, this.group, msgId);
-								console.error(
-									`[StreamQueue:${this.stream}] Job ${msgId} moved to DLQ after ${newAttempts} attempts`,
-								);
-							}
+							await this.retryOrDlq(msgId, job, err);
 						}
-					}
-				}
+					}),
+				);
 			} catch (err) {
 				if (this.running) {
 					console.error(`[StreamQueue:${this.stream}] Read error:`, err);
@@ -155,27 +146,17 @@ export class StreamQueue<T = unknown> {
 					const job: StreamJob<T> = {
 						id: claimedId,
 						data: JSON.parse(fieldMap.get("data") ?? "null") as T,
-						attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10) + 1,
+						attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10),
 					};
 
 					if (job.attempts >= this.opts.maxRetries) {
-						await redis.xadd(
-							this.dlq,
-							"*",
-							"data",
-							JSON.stringify(job.data),
-							"original_id",
-							claimedId,
-							"error",
-							"max_retries_exceeded",
-						);
-						await redis.xack(this.stream, this.group, claimedId);
+						await this.moveToDlq(claimedId, job, "max_retries_exceeded");
 					} else {
 						try {
 							await handler(job);
 							await redis.xack(this.stream, this.group, claimedId);
-						} catch {
-							// Will be retried on next claim cycle
+						} catch (err) {
+							await this.retryOrDlq(claimedId, job, err);
 						}
 					}
 				}
@@ -183,6 +164,46 @@ export class StreamQueue<T = unknown> {
 		} catch (err) {
 			console.error(`[StreamQueue:${this.stream}] Claim error:`, err);
 		}
+	}
+
+	private async moveToDlq(msgId: string, job: StreamJob<T>, error: string): Promise<void> {
+		await redis.xadd(
+			this.dlq,
+			"*",
+			"data",
+			JSON.stringify(job.data),
+			"attempts",
+			String(job.attempts),
+			"original_id",
+			msgId,
+			"error",
+			error,
+		);
+		await redis.xack(this.stream, this.group, msgId);
+	}
+
+	private async retryOrDlq(msgId: string, job: StreamJob<T>, err: unknown): Promise<void> {
+		const newAttempts = job.attempts + 1;
+		const errorMessage = err instanceof Error ? err.message : String(err);
+		if (newAttempts >= this.opts.maxRetries) {
+			await this.moveToDlq(msgId, { ...job, attempts: newAttempts }, errorMessage);
+			console.error(
+				`[StreamQueue:${this.stream}] Job ${msgId} moved to DLQ after ${newAttempts} attempts`,
+			);
+			return;
+		}
+
+		await redis.eval(
+			`redis.call('XADD', KEYS[1], '*', 'data', ARGV[1], 'attempts', ARGV[2])
+			 redis.call('XACK', KEYS[1], ARGV[3], ARGV[4])
+			 return 1`,
+			1,
+			this.stream,
+			JSON.stringify(job.data),
+			String(newAttempts),
+			this.group,
+			msgId,
+		);
 	}
 
 	stop(): void {
@@ -200,7 +221,7 @@ export const queues = {
 		senderId: string;
 		messageType: number;
 		messagePreview: string;
-		memberIds: string[];
+		createdAt: string;
 	}>("inbox-fanout"),
 
 	fileProcess: new StreamQueue<{

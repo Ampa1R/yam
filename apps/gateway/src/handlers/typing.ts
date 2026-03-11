@@ -1,4 +1,5 @@
 import { publishToUsers, typing } from "@yam/db/redis";
+import { randomUUID } from "node:crypto";
 import type { ServerEvent, TypingPayload } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
@@ -19,6 +20,7 @@ export async function handleTypingStart(userId: string, data: unknown): Promise<
 	const event: ServerEvent = {
 		event: "typing",
 		data: { chatId: data.chatId, userId, isTyping: true },
+		eventId: randomUUID(),
 	};
 
 	const others = memberIds.filter((id) => id !== userId);
@@ -42,6 +44,7 @@ export async function handleTypingStop(userId: string, data: unknown): Promise<v
 	const event: ServerEvent = {
 		event: "typing",
 		data: { chatId: data.chatId, userId, isTyping: false },
+		eventId: randomUUID(),
 	};
 
 	const others = memberIds.filter((id) => id !== userId);

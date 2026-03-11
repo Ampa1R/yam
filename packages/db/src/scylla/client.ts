@@ -1,7 +1,8 @@
 import { Client, mapping, types } from "cassandra-driver";
 
 const contactPoints = (process.env.SCYLLA_HOSTS ?? "localhost:9042").split(",");
-const keyspace = process.env.SCYLLA_KEYSPACE ?? "yam";
+const rawKeyspace = process.env.SCYLLA_KEYSPACE ?? "yam";
+const keyspace = rawKeyspace.replace(/[^a-zA-Z0-9_]/g, "");
 const isProd = process.env.NODE_ENV === "production";
 const consistency = isProd ? types.consistencies.localQuorum : types.consistencies.localOne;
 

@@ -1,6 +1,6 @@
 import { cors } from "@elysiajs/cors";
 import { db, desc, eq, ilike, schema, sql } from "@yam/db/pg";
-import { connectRedis, disconnectRedis, redis } from "@yam/db/redis";
+import { connectRedis, disconnectRedis, publishBan, redis } from "@yam/db/redis";
 import { connectScylla, disconnectScylla } from "@yam/db/scylla";
 import { UserRole } from "@yam/shared";
 import { verifyAccessToken } from "@yam/shared/jwt";
@@ -94,6 +94,7 @@ const app = new Elysia()
 						.where(eq(schema.users.id, params.id));
 
 					await db.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, params.id));
+					await publishBan(params.id);
 
 					return { success: true, message: `User ${params.id} banned` };
 				},
@@ -163,11 +164,14 @@ const app = new Elysia()
 
 console.log(`[Admin] Running on http://localhost:${port}`);
 
+let shuttingDown = false;
 async function gracefulShutdown(signal: string) {
+	if (shuttingDown) return;
+	shuttingDown = true;
 	console.log(`[Admin] ${signal} received, shutting down gracefully...`);
-	app.stop();
-	await disconnectRedis();
-	await disconnectScylla();
+	try { app.stop(); } catch {}
+	await disconnectRedis().catch(() => {});
+	await disconnectScylla().catch(() => {});
 	console.log(`[Admin] Shutdown complete`);
 	process.exit(0);
 }

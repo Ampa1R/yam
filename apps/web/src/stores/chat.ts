@@ -1,5 +1,5 @@
 import type { InboxItem, Message } from "@yam/shared";
-import { Limits } from "@yam/shared";
+import { Limits, MessageStatus } from "@yam/shared";
 import { create } from "zustand";
 
 interface PendingMessage {
@@ -11,6 +11,15 @@ interface PendingMessage {
 interface PresenceInfo {
 	isOnline: boolean;
 	lastSeen: string | null;
+	updatedAt?: number;
+}
+
+interface WsErrorInfo {
+	code: string;
+	message: string;
+	severity?: "info" | "warning" | "error";
+	retryable?: boolean;
+	scope?: "auth" | "chat" | "message" | "system";
 }
 
 interface ChatState {
@@ -20,6 +29,8 @@ interface ChatState {
 	typingUsers: Map<string, Map<string, ReturnType<typeof setTimeout>>>;
 	pendingMessages: Map<string, PendingMessage>;
 	presence: Map<string, PresenceInfo>;
+	messageStatuses: Map<string, number>;
+	wsError: WsErrorInfo | null;
 
 	setActiveChatId: (chatId: string | null) => void;
 	setInbox: (inbox: InboxItem[]) => void;
@@ -37,6 +48,9 @@ interface ChatState {
 	prependMessages: (chatId: string, messages: Message[]) => void;
 	setPresence: (userId: string, info: PresenceInfo) => void;
 	getPresence: (userId: string) => PresenceInfo;
+	setMessageStatus: (messageId: string, status: number) => void;
+	getMessageStatus: (messageId: string) => number;
+	setWsError: (error: WsErrorInfo | null) => void;
 	clearChat: (chatId: string) => void;
 }
 
@@ -47,15 +61,70 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	typingUsers: new Map(),
 	pendingMessages: new Map(),
 	presence: new Map(),
+	messageStatuses: new Map(),
+	wsError: null,
 
 	setActiveChatId: (chatId) => set({ activeChatId: chatId }),
 
-	setInbox: (inbox) => set({ inbox }),
+	setInbox: (apiInbox) =>
+		set((state) => {
+			const localMap = new Map(state.inbox.map((item) => [item.chatId, item]));
+			const apiIds = new Set(apiInbox.map((item) => item.chatId));
+
+			const merged = apiInbox.map((apiItem) => {
+				const local = localMap.get(apiItem.chatId);
+				if (!local) return apiItem;
+
+				const localTime = new Date(local.lastActivity).getTime();
+				const apiTime = new Date(apiItem.lastActivity).getTime();
+
+				if (localTime > apiTime) {
+					return {
+						...apiItem,
+						lastMsgPreview: local.lastMsgPreview,
+						lastMsgSender: local.lastMsgSender,
+						lastMsgType: local.lastMsgType,
+						lastActivity: local.lastActivity,
+						unreadCount: local.unreadCount,
+					};
+				}
+
+				if (local.unreadCount === 0 && apiItem.unreadCount > 0 && apiTime <= localTime) {
+					return { ...apiItem, unreadCount: 0 };
+				}
+
+				return apiItem;
+			});
+
+			const WS_ONLY_RETENTION_MS = 30_000;
+			const now = Date.now();
+			for (const [chatId, local] of localMap) {
+				if (apiIds.has(chatId)) continue;
+				const age = now - new Date(local.lastActivity).getTime();
+				if (age < WS_ONLY_RETENTION_MS) {
+					merged.push(local);
+				}
+			}
+
+			merged.sort((a, b) => {
+				if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+				return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
+			});
+
+			return { inbox: merged };
+		}),
 
 	updateInboxItem: (chatId, updates) =>
-		set((state) => ({
-			inbox: state.inbox.map((item) => (item.chatId === chatId ? { ...item, ...updates } : item)),
-		})),
+		set((state) => {
+			const updated = state.inbox.map((item) =>
+				item.chatId === chatId ? { ...item, ...updates } : item,
+			);
+			updated.sort((a, b) => {
+				if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+				return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
+			});
+			return { inbox: updated };
+		}),
 
 	addInboxItem: (item) =>
 		set((state) => {
@@ -126,7 +195,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 			const newPending = new Map(state.pendingMessages);
 			newPending.delete(clientId);
 
-			return { messages: newMessages, pendingMessages: newPending };
+			const newStatuses = new Map(state.messageStatuses);
+			newStatuses.set(messageId, MessageStatus.SENT);
+
+			return { messages: newMessages, pendingMessages: newPending, messageStatuses: newStatuses };
 		}),
 
 	updateMessage: (chatId, messageId, updates) =>
@@ -207,8 +279,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
 	setPresence: (userId, info) =>
 		set((state) => {
+			const existing = state.presence.get(userId);
+			const incomingTime = info.updatedAt ?? 0;
+			const existingTime = existing?.updatedAt ?? 0;
+			if (existing && existingTime > incomingTime) return state;
 			const newMap = new Map(state.presence);
-			newMap.set(userId, info);
+			newMap.set(userId, { ...info, updatedAt: incomingTime || Date.now() });
 			return { presence: newMap };
 		}),
 
@@ -216,10 +292,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
 		return get().presence.get(userId) ?? { isOnline: false, lastSeen: null };
 	},
 
+	setMessageStatus: (messageId, status) =>
+		set((state) => {
+			const current = state.messageStatuses.get(messageId) ?? -1;
+			if (status <= current) return state;
+			const newMap = new Map(state.messageStatuses);
+			newMap.set(messageId, status);
+			return { messageStatuses: newMap };
+		}),
+
+	getMessageStatus: (messageId) => {
+		return get().messageStatuses.get(messageId) ?? MessageStatus.SENT;
+	},
+
+	setWsError: (error) => set({ wsError: error }),
+
 	clearChat: (chatId) =>
 		set((state) => {
 			const newMessages = new Map(state.messages);
+			const msgs = newMessages.get(chatId);
 			newMessages.delete(chatId);
-			return { messages: newMessages };
+
+			const newStatuses = new Map(state.messageStatuses);
+			if (msgs) {
+				for (const m of msgs) {
+					newStatuses.delete(m.id);
+				}
+			}
+
+			const newTyping = new Map(state.typingUsers);
+			newTyping.delete(chatId);
+
+			return { messages: newMessages, messageStatuses: newStatuses, typingUsers: newTyping };
 		}),
 }));

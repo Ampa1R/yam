@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { db, eq, schema } from "@yam/db/pg";
-import { queues } from "@yam/db/redis";
+import { db, eq, schema, sql } from "@yam/db/pg";
+import { queues, rateLimit } from "@yam/db/redis";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
 
@@ -40,6 +40,12 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 				return { error: "Unauthorized" };
 			}
 
+			const allowed = await rateLimit.check(`${userId}:upload`, 30, 60);
+			if (!allowed) {
+				set.status = 429;
+				return { error: "Upload rate limit exceeded. Try again later." };
+			}
+
 			const { file } = body;
 
 			if (!isAllowedMimeType(file.type)) {
@@ -54,7 +60,8 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 
 			const now = new Date();
 			const datePath = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")}`;
-			const ext = file.name.split(".").pop() ?? "bin";
+			const rawExt = file.name.split(".").pop() ?? "bin";
+			const ext = rawExt.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "bin";
 			const fileId = randomUUID();
 			const storageKey = `${datePath}/${fileId}.${ext}`;
 			const fullPath = join(STORAGE_PATH, storageKey);
@@ -107,13 +114,53 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 		},
 	)
 	.get(
-		"/:id",
+		"/:id/meta",
 		async ({ params, userId, set }) => {
 			if (!userId) {
 				set.status = 401;
 				return { error: "Unauthorized" };
 			}
 
+			const [file] = await db
+				.select({
+					id: schema.files.id,
+					filename: schema.files.filename,
+					mimeType: schema.files.mimeType,
+					size: schema.files.size,
+					width: schema.files.width,
+					height: schema.files.height,
+					duration: schema.files.duration,
+					waveform: schema.files.waveform,
+				})
+				.from(schema.files)
+				.where(eq(schema.files.id, params.id))
+				.limit(1);
+
+			if (!file) {
+				set.status = 404;
+				return { error: "File not found" };
+			}
+
+			return {
+				id: file.id,
+				url: `/api/files/${file.id}`,
+				filename: file.filename,
+				mimeType: file.mimeType,
+				size: file.size,
+				width: file.width,
+				height: file.height,
+				duration: file.duration,
+				waveform: file.waveform,
+			};
+		},
+		{
+			requireAuth: true,
+			params: t.Object({ id: t.String() }),
+		},
+	)
+	.get(
+		"/:id",
+		async ({ params, set }) => {
 			const [file] = await db
 				.select()
 				.from(schema.files)
@@ -136,12 +183,12 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 			const safeName = file.filename.replace(/[^\w.\-]/g, "_");
 			set.headers["content-type"] = file.mimeType;
 			set.headers["content-disposition"] = `inline; filename="${safeName}"`;
-			set.headers["cache-control"] = "public, max-age=31536000, immutable";
+			set.headers["cache-control"] = "private, max-age=86400, immutable";
+			set.headers["x-content-type-options"] = "nosniff";
 
 			return bunFile;
 		},
 		{
-			requireAuth: true,
 			params: t.Object({ id: t.String() }),
 		},
 	);

@@ -1,5 +1,5 @@
 import { and, db, eq, ilike, or, schema, sql } from "@yam/db/pg";
-import { presence } from "@yam/db/redis";
+import { presence, rateLimit } from "@yam/db/redis";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
 
@@ -54,11 +54,21 @@ export const usersRoutes = new Elysia({ prefix: "/users" })
 			if (body.statusText !== undefined) updates.statusText = body.statusText;
 			if (body.isProfilePublic !== undefined) updates.isProfilePublic = body.isProfilePublic;
 
-			const [user] = await db
-				.update(schema.users)
-				.set(updates)
-				.where(eq(schema.users.id, userId))
-				.returning();
+			let user;
+			try {
+				[user] = await db
+					.update(schema.users)
+					.set(updates)
+					.where(eq(schema.users.id, userId))
+					.returning();
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				if (message.includes("unique") || message.includes("duplicate")) {
+					set.status = 409;
+					return { error: "Username is already taken" };
+				}
+				throw err;
+			}
 
 			if (!user) {
 				set.status = 404;
@@ -95,6 +105,12 @@ export const usersRoutes = new Elysia({ prefix: "/users" })
 			if (!userId) {
 				set.status = 401;
 				return { error: "Unauthorized" };
+			}
+
+			const allowed = await rateLimit.check(`${userId}:search`, 30, 60);
+			if (!allowed) {
+				set.status = 429;
+				return { error: "Search rate limit exceeded. Try again later." };
 			}
 
 			const { q } = query;

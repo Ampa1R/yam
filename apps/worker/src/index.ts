@@ -26,13 +26,16 @@ startCronJobs();
 
 console.log(`[Worker] ${WORKER_ID} running, consuming queues...`);
 
+let shuttingDown = false;
 async function gracefulShutdown(signal: string) {
+	if (shuttingDown) return;
+	shuttingDown = true;
 	console.log(`[Worker] ${WORKER_ID} ${signal} received, shutting down...`);
 	queues.inboxFanout.stop();
 	queues.fileProcess.stop();
 	queues.pushSend.stop();
-	await disconnectRedis();
-	await disconnectScylla();
+	await disconnectRedis().catch(() => {});
+	await disconnectScylla().catch(() => {});
 	console.log(`[Worker] Shutdown complete`);
 	process.exit(0);
 }

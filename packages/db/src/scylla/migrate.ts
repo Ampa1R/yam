@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { scyllaBootstrapClient } from "./client";
 
 export async function migrateScylla(): Promise<void> {
-	const keyspace = process.env.SCYLLA_KEYSPACE ?? "yam";
+	const keyspace = (process.env.SCYLLA_KEYSPACE ?? "yam").replace(/[^a-zA-Z0-9_]/g, "");
 	const _contactPoints = (process.env.SCYLLA_HOSTS ?? "localhost:9042").split(",");
 
 	const client = scyllaBootstrapClient;
@@ -18,9 +18,11 @@ export async function migrateScylla(): Promise<void> {
 	const schemaCql = readFileSync(schemaPath, "utf-8");
 
 	const statements = schemaCql
+		.replace(/--.*$/gm, "")
+		.replaceAll("yam.", `${keyspace}.`)
 		.split(";")
 		.map((s) => s.trim())
-		.filter((s) => s.length > 0 && !s.startsWith("--"));
+		.filter((s) => s.length > 0);
 
 	for (const stmt of statements) {
 		await client.execute(stmt);

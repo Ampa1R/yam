@@ -87,7 +87,7 @@ export const refreshTokens = pgTable(
 	{
 		id: uuid("id").primaryKey().defaultRandom(),
 		userId: uuid("user_id").notNull(),
-		tokenHash: varchar("token_hash", { length: 128 }).notNull(),
+		tokenHash: varchar("token_hash", { length: 128 }).notNull().unique(),
 		deviceInfo: text("device_info"),
 		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -121,7 +121,7 @@ export const files = pgTable(
 		storageKey: text("storage_key").notNull(),
 		width: smallint("width"),
 		height: smallint("height"),
-		duration: smallint("duration"),
+		duration: integer("duration"),
 		waveform: jsonb("waveform"),
 		createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 	},

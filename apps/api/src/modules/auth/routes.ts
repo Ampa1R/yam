@@ -1,4 +1,4 @@
-import { db, eq, schema } from "@yam/db/pg";
+import { and, db, eq, schema } from "@yam/db/pg";
 import { otp, rateLimit } from "@yam/db/redis";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
@@ -8,17 +8,28 @@ import {
 	createRefreshToken,
 	hashToken,
 	verifyRefreshToken,
-} from "../../lib/jwt";
+} from "@yam/shared/jwt";
 
 const DEMO_ENABLED = process.env.OTP_DEMO_ENABLED === "true";
 const DEMO_CODE = process.env.OTP_DEMO_CODE ?? "000000";
 const DEMO_PHONES = new Set((process.env.OTP_DEMO_PHONES ?? "").split(",").filter(Boolean));
 
+function extractIp(request: Request): string {
+	const forwardedFor = request.headers.get("x-forwarded-for");
+	if (forwardedFor) {
+		const first = forwardedFor.split(",")[0]?.trim();
+		if (first && first !== "unknown") return first;
+	}
+	const realIp = request.headers.get("x-real-ip");
+	if (realIp) return realIp.trim();
+	return "0.0.0.0";
+}
+
 export const authRoutes = new Elysia({ prefix: "/auth" })
 	.post(
 		"/request-otp",
 		async ({ body, set, request }) => {
-			const ip = request.headers.get("x-forwarded-for") ?? "unknown";
+			const ip = extractIp(request);
 			const allowed = await rateLimit.check(`${ip}:otp`, 5, 3600);
 			if (!allowed) {
 				set.status = 429;
@@ -26,13 +37,20 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 			}
 
 			const { phone } = body;
+			const allowedByPhone = await rateLimit.check(`phone:${phone}:otp`, 3, 3600);
+			if (!allowedByPhone) {
+				set.status = 429;
+				return { error: "Too many OTP requests for this phone. Try again later." };
+			}
 
 			if (DEMO_ENABLED && DEMO_PHONES.has(phone)) {
 				await otp.set(phone, DEMO_CODE);
 				return { success: true, demo: true };
 			}
 
-			const code = String(Math.floor(100000 + Math.random() * 900000));
+			const bytes = new Uint32Array(1);
+			crypto.getRandomValues(bytes);
+			const code = String(100000 + (bytes[0]! % 900000));
 			await otp.set(phone, code);
 
 			if (process.env.NODE_ENV !== "production") {
@@ -49,7 +67,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 	)
 	.post(
 		"/verify-otp",
-		async ({ body, set }) => {
+		async ({ body, set, request }) => {
 			const { phone, code } = body;
 
 			const attempts = await otp.incrementAttempts(phone);
@@ -64,7 +82,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 				return { error: "Invalid or expired code" };
 			}
 
-			await otp.del(phone);
+			const ip = extractIp(request);
 
 			let [user] = await db
 				.select()
@@ -92,6 +110,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 				expiresAt,
 			});
 
+			await otp.del(phone);
+			await otp.resetAttempts(phone);
+			await rateLimit.reset(`phone:${phone}:otp`);
+			await rateLimit.reset(`${ip}:otp`);
+
 			return {
 				accessToken,
 				refreshToken,
@@ -118,7 +141,14 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 	)
 	.post(
 		"/refresh",
-		async ({ body, set }) => {
+		async ({ body, set, request }) => {
+			const ip = extractIp(request);
+			const allowed = await rateLimit.check(`${ip}:refresh`, 10, 60);
+			if (!allowed) {
+				set.status = 429;
+				return { error: "Too many refresh requests. Try again later." };
+			}
+
 			const { refreshToken } = body;
 			const payload = await verifyRefreshToken(refreshToken);
 
@@ -128,23 +158,20 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 			}
 
 			const tokenHash = await hashToken(refreshToken);
-			const [stored] = await db
-				.select()
-				.from(schema.refreshTokens)
+			const [rotatedToken] = await db
+				.delete(schema.refreshTokens)
 				.where(eq(schema.refreshTokens.tokenHash, tokenHash))
-				.limit(1);
+				.returning({ userId: schema.refreshTokens.userId, expiresAt: schema.refreshTokens.expiresAt });
 
-			if (!stored || stored.expiresAt < new Date()) {
+			if (!rotatedToken || rotatedToken.expiresAt < new Date()) {
 				set.status = 401;
 				return { error: "Refresh token expired or revoked" };
 			}
 
-			await db.delete(schema.refreshTokens).where(eq(schema.refreshTokens.id, stored.id));
-
 			const [user] = await db
 				.select()
 				.from(schema.users)
-				.where(eq(schema.users.id, payload.sub))
+				.where(eq(schema.users.id, rotatedToken.userId))
 				.limit(1);
 
 			if (!user) {
@@ -180,15 +207,34 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 	.use(authMiddleware)
 	.post(
 		"/logout",
-		async ({ userId, set }) => {
+		async ({ userId, body, set }) => {
 			if (!userId) {
 				set.status = 401;
 				return { error: "Unauthorized" };
 			}
 
-			await db.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, userId));
+			if (body?.refreshToken) {
+				const tokenHash = await hashToken(body.refreshToken);
+				await db
+					.delete(schema.refreshTokens)
+					.where(
+						and(
+							eq(schema.refreshTokens.userId, userId),
+							eq(schema.refreshTokens.tokenHash, tokenHash),
+						),
+					);
+			} else {
+				await db.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, userId));
+			}
 
 			return { success: true };
 		},
-		{ requireAuth: true },
+		{
+			requireAuth: true,
+			body: t.Optional(
+				t.Object({
+					refreshToken: t.Optional(t.String()),
+				}),
+			),
+		},
 	);

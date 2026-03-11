@@ -1,6 +1,7 @@
 import type { Message } from "./message";
 
 export type ClientEvent =
+	| { event: "auth"; data: AuthPayload }
 	| { event: "message:send"; data: SendMessagePayload }
 	| { event: "message:edit"; data: EditMessagePayload }
 	| { event: "message:delete"; data: DeleteMessagePayload }
@@ -9,7 +10,9 @@ export type ClientEvent =
 	| { event: "typing:stop"; data: TypingPayload }
 	| { event: "ping" };
 
-export type ServerEvent =
+export type ServerEvent = {
+	eventId?: string;
+} & (
 	| { event: "message:new"; data: Message }
 	| { event: "message:updated"; data: MessageUpdatedPayload }
 	| { event: "message:deleted"; data: MessageDeletedPayload }
@@ -18,14 +21,32 @@ export type ServerEvent =
 	| { event: "typing"; data: TypingEventPayload }
 	| { event: "presence"; data: PresenceEventPayload }
 	| { event: "chat:updated"; data: ChatUpdatedPayload }
+	| { event: "auth:ok"; data: AuthOkPayload }
 	| { event: "pong" }
-	| { event: "error"; data: ErrorPayload };
+	| { event: "error"; data: ErrorPayload }
+);
+
+export interface AuthPayload {
+	token: string;
+}
+
+export interface AuthOkPayload {
+	userId: string;
+}
 
 export interface SendMessagePayload {
 	chatId: string;
 	type: number;
 	content: string;
-	attachments?: { url: string; type: number; filename?: string; size: number; mimeType: string }[];
+	attachments?: {
+		url: string;
+		type: number;
+		filename?: string;
+		size: number;
+		mimeType: string;
+		duration?: number;
+		waveform?: number[];
+	}[];
 	mediaGroupId?: string;
 	replyTo?: string;
 	clientId: string;
@@ -99,7 +120,13 @@ export interface ChatUpdatedPayload {
 	unreadCount: number;
 }
 
+export type ErrorSeverity = "info" | "warning" | "error";
+export type ErrorScope = "auth" | "chat" | "message" | "system";
+
 export interface ErrorPayload {
 	code: string;
 	message: string;
+	severity: ErrorSeverity;
+	retryable: boolean;
+	scope: ErrorScope;
 }

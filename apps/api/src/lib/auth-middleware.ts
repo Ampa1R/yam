@@ -1,5 +1,39 @@
 import { Elysia } from "elysia";
-import { verifyAccessToken } from "./jwt";
+import { db, eq, schema } from "@yam/db/pg";
+import { subscribeToBans } from "@yam/db/redis";
+import { verifyAccessToken } from "@yam/shared/jwt";
+
+const BANNED_CACHE_TTL_MS = 60_000;
+const bannedUserCache = new Map<string, { banned: boolean; expiresAt: number }>();
+
+subscribeToBans((userId) => {
+	bannedUserCache.set(userId, { banned: true, expiresAt: Date.now() + BANNED_CACHE_TTL_MS });
+});
+
+async function isUserBanned(userId: string): Promise<boolean> {
+	const cached = bannedUserCache.get(userId);
+	if (cached && cached.expiresAt > Date.now()) {
+		return cached.banned;
+	}
+
+	const [user] = await db
+		.select({ role: schema.users.role })
+		.from(schema.users)
+		.where(eq(schema.users.id, userId))
+		.limit(1);
+
+	const banned = !user || user.role < 0;
+	bannedUserCache.set(userId, { banned, expiresAt: Date.now() + BANNED_CACHE_TTL_MS });
+
+	if (bannedUserCache.size > 10_000) {
+		const now = Date.now();
+		for (const [key, entry] of bannedUserCache) {
+			if (entry.expiresAt < now) bannedUserCache.delete(key);
+		}
+	}
+
+	return banned;
+}
 
 export const authMiddleware = new Elysia({ name: "auth" })
 	.derive(async ({ request }) => {
@@ -21,14 +55,19 @@ export const authMiddleware = new Elysia({ name: "auth" })
 		requireAuth(enabled: boolean) {
 			if (!enabled) return;
 			return {
-				beforeHandle({ userId, userRole, set }) {
+				async beforeHandle({ userId, userRole, set }) {
 					if (!userId) {
 						set.status = 401;
 						return { error: "Unauthorized" };
 					}
 					if (userRole != null && userRole < 0) {
 						set.status = 403;
-						return { error: "Account suspended" };
+						return { error: "Account suspended", code: "ACCOUNT_SUSPENDED" };
+					}
+					const banned = await isUserBanned(userId);
+					if (banned) {
+						set.status = 403;
+						return { error: "Account suspended", code: "ACCOUNT_SUSPENDED" };
 					}
 				},
 			};

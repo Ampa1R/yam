@@ -1,5 +1,23 @@
-const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret-change-me";
-const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET ?? "dev-refresh-secret-change-me";
+const isProd = process.env.NODE_ENV === "production";
+const MIN_SECRET_LENGTH = 32;
+
+function resolveSecret(envName: "JWT_SECRET" | "JWT_REFRESH_SECRET", fallback: string): string {
+	const value = process.env[envName];
+	if (value && value.length >= MIN_SECRET_LENGTH) {
+		return value;
+	}
+
+	if (isProd) {
+		throw new Error(
+			`[JWT] ${envName} must be set and at least ${MIN_SECRET_LENGTH} characters in production`,
+		);
+	}
+
+	return value ?? fallback;
+}
+
+const JWT_SECRET = resolveSecret("JWT_SECRET", "dev-secret-change-me");
+const JWT_REFRESH_SECRET = resolveSecret("JWT_REFRESH_SECRET", "dev-refresh-secret-change-me");
 const ACCESS_EXPIRES_IN_MS = 15 * 60 * 1000;
 const REFRESH_EXPIRES_IN_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -18,7 +36,7 @@ function base64UrlDecode(str: string): string {
 	return atob(str.replace(/-/g, "+").replace(/_/g, "/"));
 }
 
-async function importKey(secret: string, usage: "sign" | "verify"): Promise<CryptoKey> {
+function importKey(secret: string, usage: "sign" | "verify"): Promise<CryptoKey> {
 	return crypto.subtle.importKey(
 		"raw",
 		new TextEncoder().encode(secret),
@@ -28,9 +46,16 @@ async function importKey(secret: string, usage: "sign" | "verify"): Promise<Cryp
 	);
 }
 
+const keys = {
+	accessSign: importKey(JWT_SECRET, "sign"),
+	accessVerify: importKey(JWT_SECRET, "verify"),
+	refreshSign: importKey(JWT_REFRESH_SECRET, "sign"),
+	refreshVerify: importKey(JWT_REFRESH_SECRET, "verify"),
+};
+
 async function signToken(
 	payload: Omit<JwtPayload, "iat" | "exp">,
-	secret: string,
+	keyPromise: Promise<CryptoKey>,
 	expiresInMs: number,
 ): Promise<string> {
 	const now = Math.floor(Date.now() / 1000);
@@ -42,20 +67,20 @@ async function signToken(
 
 	const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
 	const body = base64UrlEncode(JSON.stringify(fullPayload));
-	const key = await importKey(secret, "sign");
+	const key = await keyPromise;
 	const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${header}.${body}`));
 	const sig = base64UrlEncode(String.fromCharCode(...new Uint8Array(signature)));
 
 	return `${header}.${body}.${sig}`;
 }
 
-async function verifyToken(token: string, secret: string): Promise<JwtPayload | null> {
+async function verifyToken(token: string, keyPromise: Promise<CryptoKey>): Promise<JwtPayload | null> {
 	try {
 		const parts = token.split(".");
 		if (parts.length !== 3) return null;
 
 		const [header, body, signature] = parts;
-		const key = await importKey(secret, "verify");
+		const key = await keyPromise;
 
 		const sigBytes = Uint8Array.from(base64UrlDecode(signature!), (c) => c.charCodeAt(0));
 		const valid = await crypto.subtle.verify(
@@ -77,19 +102,19 @@ async function verifyToken(token: string, secret: string): Promise<JwtPayload | 
 }
 
 export async function createAccessToken(userId: string, role: number): Promise<string> {
-	return signToken({ sub: userId, role }, JWT_SECRET, ACCESS_EXPIRES_IN_MS);
+	return signToken({ sub: userId, role }, keys.accessSign, ACCESS_EXPIRES_IN_MS);
 }
 
 export async function createRefreshToken(userId: string, role: number): Promise<string> {
-	return signToken({ sub: userId, role }, JWT_REFRESH_SECRET, REFRESH_EXPIRES_IN_MS);
+	return signToken({ sub: userId, role }, keys.refreshSign, REFRESH_EXPIRES_IN_MS);
 }
 
 export async function verifyAccessToken(token: string): Promise<JwtPayload | null> {
-	return verifyToken(token, JWT_SECRET);
+	return verifyToken(token, keys.accessVerify);
 }
 
 export async function verifyRefreshToken(token: string): Promise<JwtPayload | null> {
-	return verifyToken(token, JWT_REFRESH_SECRET);
+	return verifyToken(token, keys.refreshVerify);
 }
 
 export async function hashToken(token: string): Promise<string> {

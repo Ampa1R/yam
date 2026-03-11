@@ -1,7 +1,6 @@
-import type { AuthTokens, User } from "@yam/shared";
 import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, eden } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useAuthStore } from "@/stores/auth";
 
@@ -16,13 +15,10 @@ export function LoginPage() {
 	const navigate = useNavigate();
 	const { setUser, setTokens } = useAuthStore();
 
-	const handlePhoneChange = useCallback(
-		(e: React.ChangeEvent<HTMLInputElement>) => {
-			const value = e.target.value.replace(/[^\d+]/g, "");
-			if (value.length <= 16) setPhone(value);
-		},
-		[],
-	);
+	const handlePhoneChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+		const value = e.target.value.replace(/[^\d+]/g, "");
+		if (value.length <= 16) setPhone(value);
+	}, []);
 
 	const handleRequestOtp = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -35,7 +31,7 @@ export function LoginPage() {
 
 		setLoading(true);
 		try {
-			await api.post("/auth/request-otp", { phone });
+			await eden(api.api.auth["request-otp"].post({ phone }));
 			setStep("otp");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Failed to send code");
@@ -55,10 +51,12 @@ export function LoginPage() {
 
 		setLoading(true);
 		try {
-			const res = await api.post<AuthTokens & { user: User }>("/auth/verify-otp", {
-				phone,
-				code,
-			});
+			const raw = await eden(api.api.auth["verify-otp"].post({ phone, code }));
+			const res = raw as {
+				accessToken: string;
+				refreshToken: string;
+				user: Parameters<typeof setUser>[0];
+			};
 			setTokens(res.accessToken, res.refreshToken);
 			setUser(res.user);
 			navigate("/");
@@ -74,9 +72,7 @@ export function LoginPage() {
 			<div className="w-full max-w-sm rounded-2xl bg-surface p-8 shadow-lg">
 				<div className="mb-8 text-center">
 					<h1 className="text-3xl font-bold text-primary">YAM</h1>
-					<p className="mt-2 text-sm text-text-secondary">
-						Yet Another Messenger
-					</p>
+					<p className="mt-2 text-sm text-text-secondary">Yet Another Messenger</p>
 				</div>
 
 				{step === "phone" ? (
@@ -133,12 +129,13 @@ export function LoginPage() {
 							>
 								Verification Code
 							</label>
-							<input
-								id="otp-input"
-								type="text"
-								inputMode="numeric"
-								autoComplete="one-time-code"
-								value={code}
+						<input
+							id="otp-input"
+							ref={(el) => el?.focus()}
+							type="text"
+							inputMode="numeric"
+							autoComplete="one-time-code"
+							value={code}
 								onChange={(e) => {
 									const v = e.target.value.replace(/\D/g, "");
 									if (v.length <= 6) setCode(v);

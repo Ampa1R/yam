@@ -60,3 +60,60 @@ body {
 	background: var(--color-border);
 	border-radius: 3px;
 }
+
+@keyframes fade-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+
+@keyframes fade-out {
+	from { opacity: 1; }
+	to { opacity: 0; }
+}
+
+@keyframes slide-up {
+	from { transform: translateY(16px); opacity: 0; }
+	to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes slide-down-out {
+	from { transform: translateY(0); opacity: 1; }
+	to { transform: translateY(16px); opacity: 0; }
+}
+
+@keyframes slide-in-from-right {
+	from { transform: translateX(100%); }
+	to { transform: translateX(0); }
+}
+
+@keyframes slide-out-to-right {
+	from { transform: translateX(0); }
+	to { transform: translateX(100%); }
+}
+
+@keyframes overlay-show {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+
+@keyframes content-show {
+	from {
+		opacity: 0;
+		transform: translate(-50%, -48%) scale(0.96);
+	}
+	to {
+		opacity: 1;
+		transform: translate(-50%, -50%) scale(1);
+	}
+}
+
+@keyframes content-show-mobile {
+	from {
+		opacity: 0;
+		transform: translateY(16px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}

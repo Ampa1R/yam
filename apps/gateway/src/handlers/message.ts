@@ -1,6 +1,7 @@
 import { and, db, eq, schema } from "@yam/db/pg";
-import { publishToUsers, queues, rateLimit } from "@yam/db/redis";
+import { publishToUsers, queues, rateLimit, userConnections } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
+import { randomUUID } from "node:crypto";
 import type {
 	Attachment,
 	DeleteMessagePayload,
@@ -8,14 +9,36 @@ import type {
 	SendMessagePayload,
 	ServerEvent,
 } from "@yam/shared";
-import { Limits, MessageType } from "@yam/shared";
+import { Limits, MessageStatus, MessageType } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
 
+type ErrorSeverity = "info" | "warning" | "error";
+type ErrorScope = "auth" | "chat" | "message" | "system";
+
+const MSG_ERROR_DEFAULTS: Record<string, { severity: ErrorSeverity; retryable: boolean; scope: ErrorScope }> = {
+	INVALID_PAYLOAD: { severity: "warning", retryable: false, scope: "message" },
+	MESSAGE_TOO_LONG: { severity: "warning", retryable: false, scope: "message" },
+	INVALID_TYPE: { severity: "warning", retryable: false, scope: "message" },
+	RATE_LIMITED: { severity: "warning", retryable: true, scope: "message" },
+	FORBIDDEN: { severity: "error", retryable: false, scope: "chat" },
+	BLOCKED: { severity: "error", retryable: false, scope: "chat" },
+	NOT_FOUND: { severity: "error", retryable: false, scope: "message" },
+	GONE: { severity: "error", retryable: false, scope: "message" },
+};
+
 function sendError(userId: string, code: string, message: string): void {
+	const defaults = MSG_ERROR_DEFAULTS[code] ?? { severity: "error", retryable: false, scope: "message" };
 	connectionManager.sendToUser(userId, {
 		event: "error",
-		data: { code, message },
+		data: {
+			code,
+			message,
+			severity: defaults.severity,
+			retryable: defaults.retryable,
+			scope: defaults.scope,
+		},
+		eventId: randomUUID(),
 	});
 }
 
@@ -66,8 +89,17 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		return;
 	}
 
-	if (data.type < MessageType.TEXT || data.type > MessageType.SYSTEM) {
+	if (data.type < MessageType.TEXT || data.type > MessageType.VOICE) {
 		sendError(userId, "INVALID_TYPE", "Invalid message type");
+		return;
+	}
+
+	if (data.attachments && data.attachments.length > 10) {
+		sendError(userId, "INVALID_PAYLOAD", "Maximum 10 attachments per message");
+		return;
+	}
+	if (data.attachments?.some((a) => typeof a.url === "string" && !a.url.startsWith("/api/files/"))) {
+		sendError(userId, "INVALID_PAYLOAD", "Invalid attachment URL");
 		return;
 	}
 
@@ -118,8 +150,8 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		mimeType: a.mimeType,
 		width: null,
 		height: null,
-		duration: null,
-		waveform: null,
+		duration: a.duration ?? null,
+		waveform: a.waveform ?? null,
 	}));
 
 	const message = await scyllaQueries.insertMessage({
@@ -139,6 +171,7 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 			messageId: message.id,
 			createdAt: message.createdAt,
 		},
+		eventId: randomUUID(),
 	});
 
 	const otherMembers = memberIds.filter((id) => id !== userId);
@@ -154,7 +187,7 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		}
 	}
 
-	const newMsgEvent: ServerEvent = { event: "message:new", data: message };
+	const newMsgEvent: ServerEvent = { event: "message:new", data: message, eventId: randomUUID() };
 
 	connectionManager.sendToUsers(localRecipients, newMsgEvent);
 
@@ -162,13 +195,36 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		await publishToUsers(remoteRecipients, newMsgEvent);
 	}
 
-	const preview = (data.content || "").slice(0, Limits.INBOX_PREVIEW_LENGTH);
+	for (const memberId of otherMembers) {
+		const isOnline = connectionManager.isLocal(memberId) || (await userConnections.isConnected(memberId));
+		if (!isOnline) continue;
+		await scyllaQueries.updateMessageStatusMonotonic(
+			data.chatId,
+			message.id,
+			memberId,
+			MessageStatus.DELIVERED,
+		);
+		connectionManager.sendToUser(userId, {
+			event: "message:status",
+			data: {
+				messageId: message.id,
+				chatId: data.chatId,
+				userId: memberId,
+				status: MessageStatus.DELIVERED,
+			},
+			eventId: randomUUID(),
+		});
+	}
+
+	let preview = (data.content || "").slice(0, Limits.INBOX_PREVIEW_LENGTH);
+	if (!preview && data.type === MessageType.VOICE) preview = "🎤 Voice message";
+	else if (!preview && attachments && attachments.length > 0) preview = "📎 Attachment";
 	await queues.inboxFanout.add({
 		chatId: data.chatId,
 		senderId: userId,
 		messageType: data.type,
 		messagePreview: preview,
-		memberIds,
+		createdAt: message.createdAt,
 	});
 }
 
@@ -211,17 +267,31 @@ export async function handleEditMessage(userId: string, data: unknown): Promise<
 			content: data.content,
 			editedAt,
 		},
+		eventId: randomUUID(),
 	};
 
-	const others = memberIds.filter((id) => id !== userId);
-	connectionManager.sendToUsers(
-		others.filter((id) => connectionManager.isLocal(id)),
-		event,
-	);
-	await publishToUsers(
-		others.filter((id) => !connectionManager.isLocal(id)),
-		event,
-	);
+	const localMembers = memberIds.filter((id) => connectionManager.isLocal(id));
+	const remoteMembers = memberIds.filter((id) => !connectionManager.isLocal(id));
+	connectionManager.sendToUsers(localMembers, event);
+	if (remoteMembers.length > 0) {
+		await publishToUsers(remoteMembers, event);
+	}
+
+	const [latestMsg] = await scyllaQueries.getMessages(data.chatId, 1);
+	if (latestMsg && latestMsg.id === data.messageId) {
+		const preview = data.content.slice(0, Limits.INBOX_PREVIEW_LENGTH);
+		const inboxEvent: ServerEvent = {
+			event: "chat:updated",
+			data: {
+				chatId: data.chatId,
+				lastMessage: { senderId: existing.senderId, type: existing.type, preview, createdAt: existing.createdAt },
+				unreadCount: -1,
+			},
+			eventId: randomUUID(),
+		};
+		connectionManager.sendToUsers(localMembers, inboxEvent);
+		if (remoteMembers.length > 0) await publishToUsers(remoteMembers, inboxEvent);
+	}
 }
 
 export async function handleDeleteMessage(userId: string, data: unknown): Promise<void> {
@@ -265,15 +335,29 @@ export async function handleDeleteMessage(userId: string, data: unknown): Promis
 	const event: ServerEvent = {
 		event: "message:deleted",
 		data: { messageId: data.messageId, chatId: data.chatId },
+		eventId: randomUUID(),
 	};
 
-	const others = memberIds.filter((id) => id !== userId);
-	connectionManager.sendToUsers(
-		others.filter((id) => connectionManager.isLocal(id)),
-		event,
-	);
-	await publishToUsers(
-		others.filter((id) => !connectionManager.isLocal(id)),
-		event,
-	);
+	const localMembers = memberIds.filter((id) => connectionManager.isLocal(id));
+	const remoteMembers = memberIds.filter((id) => !connectionManager.isLocal(id));
+	connectionManager.sendToUsers(localMembers, event);
+	if (remoteMembers.length > 0) {
+		await publishToUsers(remoteMembers, event);
+	}
+
+	const recent = await scyllaQueries.getMessages(data.chatId, 3);
+	const latestActive = recent.find((m) => !m.isDeleted && m.id !== data.messageId);
+	const inboxEvent: ServerEvent = {
+		event: "chat:updated",
+		data: {
+			chatId: data.chatId,
+			lastMessage: latestActive
+				? { senderId: latestActive.senderId, type: latestActive.type, preview: (latestActive.content || "").slice(0, Limits.INBOX_PREVIEW_LENGTH), createdAt: latestActive.createdAt }
+				: null,
+			unreadCount: -1,
+		},
+		eventId: randomUUID(),
+	};
+	connectionManager.sendToUsers(localMembers, inboxEvent);
+	if (remoteMembers.length > 0) await publishToUsers(remoteMembers, inboxEvent);
 }

@@ -1,9 +1,8 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { User } from "@yam/shared";
 import { Camera, Check, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Portal } from "@/components/Portal";
-import { api } from "@/lib/api";
+import { api, eden } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useAuthStore } from "@/stores/auth";
 
@@ -17,10 +16,9 @@ export function ProfileDialog({ onClose }: Props) {
 	const [displayName, setDisplayName] = useState(user?.displayName ?? "");
 	const [username, setUsername] = useState(user?.username ?? "");
 	const [statusText, setStatusText] = useState(user?.statusText ?? "");
-	const [isProfilePublic, setIsProfilePublic] = useState(
-		user?.isProfilePublic ?? false,
-	);
+	const [isProfilePublic, setIsProfilePublic] = useState(user?.isProfilePublic ?? false);
 	const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+	const [avatarError, setAvatarError] = useState<string | null>(null);
 	const avatarInputRef = useRef<HTMLInputElement>(null);
 
 	useEffect(() => {
@@ -33,31 +31,26 @@ export function ProfileDialog({ onClose }: Props) {
 	}, [user]);
 
 	useEffect(() => {
-		const handleKeyDown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onClose();
-		};
-		document.addEventListener("keydown", handleKeyDown);
-		return () => document.removeEventListener("keydown", handleKeyDown);
-	}, [onClose]);
-
-	useEffect(() => {
 		return () => {
 			if (avatarPreview) URL.revokeObjectURL(avatarPreview);
 		};
 	}, [avatarPreview]);
 
 	const uploadAvatar = useMutation({
-		mutationFn: (file: File) =>
-			api.upload<{ id: string; url: string }>("/files/upload", file),
+		mutationFn: (file: File) => eden(api.api.files.upload.post({ file })),
 	});
 
 	const updateProfile = useMutation({
-		mutationFn: (data: Record<string, unknown>) =>
-			api.patch<User>("/users/me", data),
+		mutationFn: (data: {
+			displayName?: string;
+			username?: string;
+			avatarUrl?: string | null;
+			statusText?: string | null;
+			isProfilePublic?: boolean;
+		}) => eden(api.api.users.me.patch(data)),
 		onSuccess: (data) => {
-			setUser(data);
+			setUser(data as Parameters<typeof setUser>[0]);
 			queryClient.invalidateQueries({ queryKey: ["me"] });
-			onClose();
 		},
 	});
 
@@ -65,62 +58,58 @@ export function ProfileDialog({ onClose }: Props) {
 		async (e: React.ChangeEvent<HTMLInputElement>) => {
 			const file = e.target.files?.[0];
 			if (!file) return;
+			setAvatarError(null);
 
-			if (!file.type.startsWith("image/")) return;
-			if (file.size > 5 * 1024 * 1024) return;
+			if (!file.type.startsWith("image/")) {
+				setAvatarError("Only image files are allowed");
+				return;
+			}
+			if (file.size > 5 * 1024 * 1024) {
+				setAvatarError("Image must be under 5 MB");
+				return;
+			}
 
 			if (avatarPreview) URL.revokeObjectURL(avatarPreview);
 			setAvatarPreview(URL.createObjectURL(file));
 
 			try {
 				const result = await uploadAvatar.mutateAsync(file);
-				updateProfile.mutate({
-					avatarUrl: result.url,
-				});
+				if (result?.url) await updateProfile.mutateAsync({ avatarUrl: result.url });
 			} catch {
 				setAvatarPreview(null);
+				setAvatarError("Failed to upload avatar");
 			}
 		},
 		[avatarPreview, uploadAvatar, updateProfile],
 	);
 
-	const handleSubmit = (e: React.FormEvent) => {
+	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
-		updateProfile.mutate({
-			displayName: displayName || undefined,
-			username: username || undefined,
-			statusText: statusText || null,
-			isProfilePublic,
-		});
+		try {
+			await updateProfile.mutateAsync({
+				displayName: displayName || undefined,
+				username: username || undefined,
+				statusText: statusText || null,
+				isProfilePublic,
+			});
+			onClose();
+		} catch {
+			// error shown via updateProfile.isError
+		}
 	};
 
 	const avatarSrc = avatarPreview ?? user?.avatarUrl;
 
 	return (
-		<Portal>
-			<div
-				className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-				onClick={onClose}
-				role="dialog"
-				aria-modal="true"
-				aria-label="Edit profile"
-			>
-				<div
-					className="w-full max-w-md rounded-2xl bg-surface p-6 shadow-xl"
-					onClick={(e) => e.stopPropagation()}
-				>
+		<Dialog.Root open onOpenChange={(open) => !open && onClose()}>
+			<Dialog.Portal>
+				<Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 animate-[overlay-show_150ms_ease-out]" />
+				<Dialog.Content className="fixed z-50 w-[calc(100%-2rem)] max-w-md rounded-2xl bg-surface p-6 shadow-xl inset-x-4 top-[5vh] max-h-[90vh] overflow-y-auto lg:inset-x-auto lg:left-1/2 lg:top-1/2 lg:-translate-x-1/2 lg:-translate-y-1/2 animate-[content-show-mobile_200ms_ease-out] lg:animate-[content-show_200ms_ease-out]">
 					<div className="mb-6 flex items-center justify-between">
-						<h2 className="text-lg font-semibold text-text-primary">
-							Edit Profile
-						</h2>
-						<button
-							type="button"
-							onClick={onClose}
-							className="rounded-lg p-1 hover:bg-surface-hover"
-							aria-label="Close"
-						>
+						<Dialog.Title className="text-lg font-semibold text-text-primary">Edit Profile</Dialog.Title>
+						<Dialog.Close className="rounded-lg p-1 hover:bg-surface-hover" aria-label="Close">
 							<X size={20} className="text-text-secondary" />
-						</button>
+						</Dialog.Close>
 					</div>
 
 					<div className="mb-6 flex justify-center">
@@ -133,8 +122,7 @@ export function ProfileDialog({ onClose }: Props) {
 								/>
 							) : (
 								<div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-2xl font-bold text-white">
-									{displayName.charAt(0)?.toUpperCase() ??
-										"U"}
+									{displayName.charAt(0)?.toUpperCase() ?? "U"}
 								</div>
 							)}
 							<input
@@ -146,9 +134,7 @@ export function ProfileDialog({ onClose }: Props) {
 							/>
 							<button
 								type="button"
-								onClick={() =>
-									avatarInputRef.current?.click()
-								}
+								onClick={() => avatarInputRef.current?.click()}
 								disabled={uploadAvatar.isPending}
 								className={cn(
 									"absolute bottom-0 right-0 flex h-7 w-7 items-center justify-center rounded-full bg-primary text-white shadow-md",
@@ -165,6 +151,11 @@ export function ProfileDialog({ onClose }: Props) {
 						</div>
 					</div>
 
+					{avatarError && (
+						<div className="mb-4 rounded-lg bg-danger/10 px-4 py-2 text-sm text-danger">
+							{avatarError}
+						</div>
+					)}
 					{(updateProfile.isError || uploadAvatar.isError) && (
 						<div className="mb-4 rounded-lg bg-danger/10 px-4 py-2 text-sm text-danger">
 							{updateProfile.error instanceof Error
@@ -187,9 +178,7 @@ export function ProfileDialog({ onClose }: Props) {
 								id="profile-display-name"
 								type="text"
 								value={displayName}
-								onChange={(e) =>
-									setDisplayName(e.target.value)
-								}
+								onChange={(e) => setDisplayName(e.target.value)}
 								maxLength={100}
 								className={cn(
 									"w-full rounded-lg border border-border bg-surface px-4 py-2.5 text-sm",
@@ -213,14 +202,7 @@ export function ProfileDialog({ onClose }: Props) {
 									id="profile-username"
 									type="text"
 									value={username}
-									onChange={(e) =>
-										setUsername(
-											e.target.value.replace(
-												/[^a-zA-Z0-9_]/g,
-												"",
-											),
-										)
-									}
+									onChange={(e) => setUsername(e.target.value.replace(/[^a-zA-Z0-9_]/g, ""))}
 									maxLength={50}
 									className={cn(
 										"w-full rounded-lg border border-border bg-surface py-2.5 pl-7 pr-4 text-sm",
@@ -242,9 +224,7 @@ export function ProfileDialog({ onClose }: Props) {
 								id="profile-status"
 								type="text"
 								value={statusText}
-								onChange={(e) =>
-									setStatusText(e.target.value)
-								}
+								onChange={(e) => setStatusText(e.target.value)}
 								maxLength={200}
 								placeholder="What's on your mind?"
 								className={cn(
@@ -256,33 +236,25 @@ export function ProfileDialog({ onClose }: Props) {
 
 						<div className="flex items-center justify-between rounded-lg border border-border px-4 py-3">
 							<div>
-								<p className="text-sm font-medium text-text-primary">
-									Public Profile
-								</p>
+								<p className="text-sm font-medium text-text-primary">Public Profile</p>
 								<p className="text-xs text-text-secondary">
 									Others can see your avatar and status
 								</p>
 							</div>
 							<button
 								type="button"
-								onClick={() =>
-									setIsProfilePublic(!isProfilePublic)
-								}
+								onClick={() => setIsProfilePublic(!isProfilePublic)}
 								role="switch"
 								aria-checked={isProfilePublic}
 								className={cn(
 									"relative h-6 w-11 rounded-full transition-colors",
-									isProfilePublic
-										? "bg-primary"
-										: "bg-border",
+									isProfilePublic ? "bg-primary" : "bg-border",
 								)}
 							>
 								<span
 									className={cn(
 										"absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
-										isProfilePublic
-											? "left-[22px]"
-											: "left-0.5",
+										isProfilePublic ? "left-[22px]" : "left-0.5",
 									)}
 								/>
 							</button>
@@ -306,14 +278,12 @@ export function ProfileDialog({ onClose }: Props) {
 								)}
 							>
 								<Check size={16} />
-								{updateProfile.isPending
-									? "Saving..."
-									: "Save"}
+								{updateProfile.isPending ? "Saving..." : "Save"}
 							</button>
 						</div>
 					</form>
-				</div>
-			</div>
-		</Portal>
+				</Dialog.Content>
+			</Dialog.Portal>
+		</Dialog.Root>
 	);
 }

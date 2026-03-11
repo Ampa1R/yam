@@ -16,6 +16,10 @@ function timeuuidToDate(timeuuid: types.TimeUuid): Date {
 	return timeuuid.getDate();
 }
 
+export function timeuuidDate(timeuuidStr: string): Date {
+	return types.TimeUuid.fromString(timeuuidStr).getDate();
+}
+
 function rowToMessage(row: types.Row): Message {
 	return {
 		id: row.id.toString(),
@@ -211,10 +215,63 @@ export async function updateMessageStatus(
 	);
 }
 
-export async function getInbox(userId: string): Promise<InboxItem[]> {
+export async function getMessageStatus(
+	chatId: string,
+	messageId: string,
+	userId: string,
+): Promise<number | null> {
 	const result = await scyllaClient.execute(
-		`SELECT * FROM user_inbox WHERE user_id = ?`,
-		[types.Uuid.fromString(userId)],
+		`SELECT status FROM message_status WHERE chat_id = ? AND message_id = ? AND user_id = ? LIMIT 1`,
+		[
+			types.Uuid.fromString(chatId),
+			types.TimeUuid.fromString(messageId),
+			types.Uuid.fromString(userId),
+		],
+		{ prepare: true },
+	);
+	if (result.rows.length === 0) return null;
+	const row = result.rows[0] as { status?: number };
+	return typeof row.status === "number" ? row.status : null;
+}
+
+export async function updateMessageStatusMonotonic(
+	chatId: string,
+	messageId: string,
+	userId: string,
+	status: number,
+): Promise<void> {
+	const chatUuid = types.Uuid.fromString(chatId);
+	const msgUuid = types.TimeUuid.fromString(messageId);
+	const userUuid = types.Uuid.fromString(userId);
+	const now = new Date();
+
+	const insertResult = await scyllaClient.execute(
+		`INSERT INTO message_status (chat_id, message_id, user_id, status, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 IF NOT EXISTS`,
+		[chatUuid, msgUuid, userUuid, status, now],
+		{ prepare: true },
+	);
+
+	const insertApplied = insertResult?.first()?.get("[applied]");
+	if (insertApplied !== false) return;
+
+	const existingStatus = insertResult?.first()?.get("status") as number | undefined;
+	if (existingStatus != null && existingStatus >= status) return;
+
+	await scyllaClient.execute(
+		`UPDATE message_status SET status = ?, updated_at = ?
+		 WHERE chat_id = ? AND message_id = ? AND user_id = ?
+		 IF status < ?`,
+		[status, now, chatUuid, msgUuid, userUuid, status],
+		{ prepare: true },
+	);
+}
+
+export async function getInbox(userId: string, limit = 500): Promise<InboxItem[]> {
+	const result = await scyllaClient.execute(
+		`SELECT * FROM user_inbox WHERE user_id = ? LIMIT ?`,
+		[types.Uuid.fromString(userId), limit],
 		{ prepare: true },
 	);
 
@@ -242,56 +299,42 @@ export async function getInbox(userId: string): Promise<InboxItem[]> {
 export async function upsertInboxEntry(
 	userId: string,
 	entry: Omit<InboxItem, "unreadCount" | "isPinned" | "isMuted">,
-	incrementUnread: boolean = false,
+	unreadCount: number = 0,
 ): Promise<void> {
-	if (incrementUnread) {
-		await scyllaClient.execute(
-			`UPDATE user_inbox SET
-				chat_type = ?, chat_name = ?, chat_avatar = ?, other_user_id = ?,
-				last_msg_sender = ?, last_msg_type = ?, last_msg_preview = ?,
-				last_activity = ?, unread_count = unread_count + 1
-			 WHERE user_id = ? AND chat_id = ?`,
-			[
-				entry.chatType,
-				entry.chatName,
-				entry.chatAvatar,
-				entry.otherUserId ? types.Uuid.fromString(entry.otherUserId) : null,
-				entry.lastMsgSender ? types.Uuid.fromString(entry.lastMsgSender) : null,
-				entry.lastMsgType,
-				entry.lastMsgPreview,
-				new Date(entry.lastActivity),
-				types.Uuid.fromString(userId),
-				types.Uuid.fromString(entry.chatId),
-			],
-			{ prepare: true },
-		);
-	} else {
-		await scyllaClient.execute(
-			`UPDATE user_inbox SET
-				chat_type = ?, chat_name = ?, chat_avatar = ?, other_user_id = ?,
-				last_msg_sender = ?, last_msg_type = ?, last_msg_preview = ?,
-				last_activity = ?, unread_count = 0
-			 WHERE user_id = ? AND chat_id = ?`,
-			[
-				entry.chatType,
-				entry.chatName,
-				entry.chatAvatar,
-				entry.otherUserId ? types.Uuid.fromString(entry.otherUserId) : null,
-				entry.lastMsgSender ? types.Uuid.fromString(entry.lastMsgSender) : null,
-				entry.lastMsgType,
-				entry.lastMsgPreview,
-				new Date(entry.lastActivity),
-				types.Uuid.fromString(userId),
-				types.Uuid.fromString(entry.chatId),
-			],
-			{ prepare: true },
-		);
-	}
+	await scyllaClient.execute(
+		`UPDATE user_inbox SET
+			chat_type = ?, chat_name = ?, chat_avatar = ?, other_user_id = ?,
+			last_msg_sender = ?, last_msg_type = ?, last_msg_preview = ?,
+			last_activity = ?, unread_count = ?
+		 WHERE user_id = ? AND chat_id = ?`,
+		[
+			entry.chatType,
+			entry.chatName,
+			entry.chatAvatar,
+			entry.otherUserId ? types.Uuid.fromString(entry.otherUserId) : null,
+			entry.lastMsgSender ? types.Uuid.fromString(entry.lastMsgSender) : null,
+			entry.lastMsgType,
+			entry.lastMsgPreview,
+			new Date(entry.lastActivity),
+			unreadCount,
+			types.Uuid.fromString(userId),
+			types.Uuid.fromString(entry.chatId),
+		],
+		{ prepare: true },
+	);
 }
 
 export async function resetInboxUnread(userId: string, chatId: string): Promise<void> {
 	await scyllaClient.execute(
 		`UPDATE user_inbox SET unread_count = 0 WHERE user_id = ? AND chat_id = ?`,
+		[types.Uuid.fromString(userId), types.Uuid.fromString(chatId)],
+		{ prepare: true },
+	);
+}
+
+export async function deleteInboxEntry(userId: string, chatId: string): Promise<void> {
+	await scyllaClient.execute(
+		`DELETE FROM user_inbox WHERE user_id = ? AND chat_id = ?`,
 		[types.Uuid.fromString(userId), types.Uuid.fromString(chatId)],
 		{ prepare: true },
 	);

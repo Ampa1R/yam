@@ -1,77 +1,92 @@
-import { db, eq, schema } from "@yam/db/pg";
+import { and, db, eq, inArray, schema } from "@yam/db/pg";
 import type { StreamJob } from "@yam/db/redis";
-import { publishToUsers, unread } from "@yam/db/redis";
+import { unread } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
-import type { ChatType, ServerEvent } from "@yam/shared";
+import type { ChatType } from "@yam/shared";
 
 interface InboxFanoutPayload {
 	chatId: string;
 	senderId: string;
 	messageType: number;
 	messagePreview: string;
-	memberIds: string[];
+	createdAt?: string;
 }
 
 export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Promise<void> {
-	const { chatId, senderId, messageType, messagePreview, memberIds } = job.data;
+	const { chatId, senderId, messageType, messagePreview, createdAt } = job.data;
 
-	const [chat] = await db.select().from(schema.chats).where(eq(schema.chats.id, chatId)).limit(1);
+	const msgTime = createdAt ? new Date(createdAt) : new Date();
+	const lastActivity = msgTime.toISOString();
 
+	const [chatResult, allMemberships] = await Promise.all([
+		db.select().from(schema.chats).where(eq(schema.chats.id, chatId)).limit(1),
+		db
+			.select({ userId: schema.chatMembers.userId, lastReadAt: schema.chatMembers.lastReadAt })
+			.from(schema.chatMembers)
+			.where(eq(schema.chatMembers.chatId, chatId)),
+	]);
+
+	const chat = chatResult[0];
 	if (!chat) return;
 
-	const now = new Date().toISOString();
+	const currentMemberIds = allMemberships.map((m) => m.userId);
+	const nonSenderMembers = currentMemberIds.filter((id) => id !== senderId);
 
-	for (const memberId of memberIds) {
-		const isSender = memberId === senderId;
+	let displayNameMap: Map<string, string> | null = null;
+	if (chat.type === 0 && currentMemberIds.length > 0) {
+		const users = await db
+			.select({ id: schema.users.id, displayName: schema.users.displayName })
+			.from(schema.users)
+			.where(inArray(schema.users.id, currentMemberIds));
+		displayNameMap = new Map(users.map((u) => [u.id, u.displayName]));
+	}
+	const lastReadMap = new Map(allMemberships.map((m) => [m.userId, m.lastReadAt]));
 
+	const msgTimeMs = msgTime.getTime();
+	const unreadCounts = await Promise.all(
+		nonSenderMembers.map(async (memberId) => {
+			const lastRead = lastReadMap.get(memberId);
+			if (lastRead && lastRead >= msgTime) {
+				const currentCount = await unread.get(memberId, chatId);
+				return { memberId, newCount: currentCount };
+			}
+			const newCount = await unread.incrementIfUnread(memberId, chatId, msgTimeMs);
+			return { memberId, newCount };
+		}),
+	);
+	const unreadMap = new Map(unreadCounts.map(({ memberId, newCount }) => [memberId, newCount]));
+
+	const inboxUpdates: Promise<void>[] = [];
+
+	for (const memberId of currentMemberIds) {
 		let chatName = chat.name;
 		let otherUserId: string | null = null;
 
 		if (chat.type === 0) {
-			otherUserId = memberIds.find((id) => id !== memberId) ?? null;
-			if (otherUserId) {
-				const [otherUser] = await db
-					.select({ displayName: schema.users.displayName })
-					.from(schema.users)
-					.where(eq(schema.users.id, otherUserId))
-					.limit(1);
-				chatName = otherUser?.displayName ?? "Unknown";
+			otherUserId = currentMemberIds.find((id) => id !== memberId) ?? null;
+			if (otherUserId && displayNameMap) {
+				chatName = displayNameMap.get(otherUserId) ?? "Unknown";
 			}
 		}
 
-		await scyllaQueries.upsertInboxEntry(
-			memberId,
-			{
-				chatId,
-				chatType: chat.type as ChatType,
-				chatName,
-				chatAvatar: chat.avatarUrl,
-				otherUserId,
-				lastMsgSender: senderId,
-				lastMsgType: messageType,
-				lastMsgPreview: messagePreview,
-				lastActivity: now,
-			},
-			!isSender,
-		);
-
-		if (!isSender) {
-			const newCount = await unread.increment(memberId, chatId);
-
-			const chatUpdatedEvent: ServerEvent = {
-				event: "chat:updated",
-				data: {
+		inboxUpdates.push(
+			scyllaQueries.upsertInboxEntry(
+				memberId,
+				{
 					chatId,
-					lastMessage: {
-						senderId,
-						type: messageType,
-						preview: messagePreview,
-						createdAt: now,
-					},
-					unreadCount: newCount,
+					chatType: chat.type as ChatType,
+					chatName,
+					chatAvatar: chat.avatarUrl,
+					otherUserId,
+					lastMsgSender: senderId,
+					lastMsgType: messageType,
+					lastMsgPreview: messagePreview,
+					lastActivity,
 				},
-			};
-			await publishToUsers([memberId], chatUpdatedEvent);
-		}
+				unreadMap.get(memberId) ?? 0,
+			),
+		);
 	}
+
+	await Promise.all(inboxUpdates);
 }

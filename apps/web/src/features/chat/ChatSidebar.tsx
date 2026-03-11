@@ -1,8 +1,14 @@
+import * as AlertDialog from "@radix-ui/react-alert-dialog";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import type { InboxItem } from "@yam/shared";
 import { formatDistanceToNow } from "date-fns";
-import { LogOut, MessageSquare, Pin, PinOff, Plus, Search, Users } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { BellOff, LogOut, MessageSquare, MoreVertical, Pin, PinOff, Plus, Search, Trash2, Users } from "lucide-react";
+import { memo, useCallback, useDeferredValue, useMemo, useRef, useState } from "react";
+import { toast } from "@/components/Toast";
+import { api, eden } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { queryClient } from "@/lib/queryClient";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
 import { ContactsDialog } from "./ContactsDialog";
@@ -19,25 +25,90 @@ function getMessagePreview(item: InboxItem): string {
 	return item.lastMsgPreview;
 }
 
-export function ChatSidebar() {
-	const { inbox, activeChatId, setActiveChatId, togglePin } = useChatStore();
+export function ChatSidebar({ className }: { className?: string }) {
+	const inbox = useChatStore((s) => s.inbox);
+	const activeChatId = useChatStore((s) => s.activeChatId);
+	const setActiveChatId = useChatStore((s) => s.setActiveChatId);
+	const togglePin = useChatStore((s) => s.togglePin);
+	const updateInboxItem = useChatStore((s) => s.updateInboxItem);
 	const { user, logout } = useAuthStore();
+
+	const handleTogglePin = useCallback(
+		(chatId: string) => {
+			togglePin(chatId);
+			const item = useChatStore.getState().inbox.find((i) => i.chatId === chatId);
+			eden(
+				api.api.chats({ id: chatId }).membership.patch({ isPinned: item?.isPinned ?? false }),
+			).catch(() => {
+				togglePin(chatId);
+			});
+		},
+		[togglePin],
+	);
+
+	const handleToggleMute = useCallback(
+		(chatId: string, currentMuted: boolean) => {
+			updateInboxItem(chatId, { isMuted: !currentMuted });
+			eden(api.api.chats({ id: chatId }).membership.patch({ isMuted: !currentMuted })).catch(() => {
+				updateInboxItem(chatId, { isMuted: currentMuted });
+			});
+		},
+		[updateInboxItem],
+	);
+
+	const [confirmAction, setConfirmAction] = useState<{ chatId: string; chatType: number } | null>(null);
+
+	const executeDeleteOrLeave = useCallback(
+		(chatId: string, chatType: number) => {
+			const doAction = chatType === 1
+				? eden(api.api.chats({ id: chatId }).leave.delete())
+				: eden(api.api.chats({ id: chatId }).delete());
+			doAction.then(() => {
+				const state = useChatStore.getState();
+				state.clearChat(chatId);
+				state.setInbox(state.inbox.filter((i) => i.chatId !== chatId));
+				if (state.activeChatId === chatId) {
+					state.setActiveChatId(null);
+				}
+				void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+		}).catch((err) => {
+			console.error("Delete/leave failed:", err);
+			toast({
+				title: chatType === 1 ? "Failed to leave group" : "Failed to delete chat",
+				variant: "error",
+			});
+		});
+		},
+		[],
+	);
 	const [searchQuery, setSearchQuery] = useState("");
+	const deferredSearch = useDeferredValue(searchQuery);
 	const [showNewChat, setShowNewChat] = useState(false);
 	const [showProfile, setShowProfile] = useState(false);
 	const [showContacts, setShowContacts] = useState(false);
+	const listRef = useRef<HTMLDivElement>(null);
 
 	const filteredInbox = useMemo(
 		() =>
 			inbox.filter((item) => {
+				if (!deferredSearch) return true;
 				const name = getInboxDisplayName(item);
-				return name.toLowerCase().includes(searchQuery.toLowerCase());
+				return name.toLowerCase().includes(deferredSearch.toLowerCase());
 			}),
-		[inbox, searchQuery],
+		[inbox, deferredSearch],
 	);
 
+	const rowVirtualizer = useVirtualizer({
+		count: filteredInbox.length,
+		getScrollElement: () => listRef.current,
+		getItemKey: (index) => filteredInbox[index]?.chatId ?? index,
+		estimateSize: () => 76,
+		overscan: 8,
+	});
+	const virtualRows = rowVirtualizer.getVirtualItems();
+
 	return (
-		<aside className="flex w-80 flex-col border-r border-border bg-surface lg:w-96">
+		<aside className={cn("w-full flex-col border-r border-border bg-surface lg:w-80 xl:w-96", className)}>
 			<header className="flex items-center justify-between border-b border-border px-4 py-3">
 				<button
 					type="button"
@@ -58,40 +129,37 @@ export function ChatSidebar() {
 						)}
 					</div>
 				</button>
-				<div className="flex items-center gap-0.5">
-					<button
-						type="button"
-						onClick={() => setShowContacts(true)}
-						className="rounded-lg p-2 text-text-secondary hover:bg-surface-hover"
-						title="Contacts"
-					>
-						<Users size={18} />
-					</button>
-					<button
-						type="button"
-						onClick={() => setShowNewChat(true)}
-						className="rounded-lg p-2 text-text-secondary hover:bg-surface-hover"
-						title="New chat"
-					>
-						<Plus size={18} />
-					</button>
-					<button
-						type="button"
-						onClick={logout}
-						className="rounded-lg p-2 text-text-secondary hover:bg-surface-hover"
-						title="Logout"
-					>
-						<LogOut size={18} />
-					</button>
-				</div>
+			<div className="flex items-center gap-0.5">
+				<button
+					type="button"
+					onClick={() => setShowContacts(true)}
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-text-secondary hover:bg-surface-hover"
+					title="Contacts"
+				>
+					<Users size={18} />
+				</button>
+				<button
+					type="button"
+					onClick={() => setShowNewChat(true)}
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-text-secondary hover:bg-surface-hover"
+					title="New chat"
+				>
+					<Plus size={18} />
+				</button>
+				<button
+					type="button"
+					onClick={logout}
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-text-secondary hover:bg-surface-hover"
+					title="Logout"
+				>
+					<LogOut size={18} />
+				</button>
+			</div>
 			</header>
 
 			<div className="px-3 py-2">
 				<div className="relative">
-					<Search
-						size={16}
-						className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
-					/>
+					<Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
 					<input
 						type="text"
 						value={searchQuery}
@@ -106,35 +174,83 @@ export function ChatSidebar() {
 				</div>
 			</div>
 
-			<div className="flex-1 overflow-y-auto">
+			<div ref={listRef} className="flex-1 overflow-y-auto">
 				{filteredInbox.length === 0 ? (
 					<div className="flex flex-col items-center justify-center py-12 text-text-muted">
 						<MessageSquare size={48} strokeWidth={1} />
-						<p className="mt-3 text-sm">No chats yet</p>
-						<button
-							type="button"
-							onClick={() => setShowNewChat(true)}
-							className="mt-3 text-sm text-primary hover:underline"
-						>
-							Start a conversation
-						</button>
+						<p className="mt-3 text-sm">{deferredSearch ? "No matching chats" : "No chats yet"}</p>
+						{!deferredSearch && (
+							<button
+								type="button"
+								onClick={() => setShowNewChat(true)}
+								className="mt-3 text-sm text-primary hover:underline"
+							>
+								Start a conversation
+							</button>
+						)}
 					</div>
 				) : (
-					filteredInbox.map((item) => (
-						<InboxEntry
-							key={item.chatId}
-							item={item}
-							isActive={activeChatId === item.chatId}
-							onSelect={() => setActiveChatId(item.chatId)}
-							onTogglePin={() => togglePin(item.chatId)}
-						/>
-					))
+					<div className="relative w-full" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
+						{virtualRows.map((virtualRow) => {
+							const item = filteredInbox[virtualRow.index];
+							if (!item) return null;
+							return (
+								<div
+									key={item.chatId}
+									ref={rowVirtualizer.measureElement}
+									data-index={virtualRow.index}
+									className="absolute left-0 top-0 w-full"
+									style={{ transform: `translateY(${virtualRow.start}px)` }}
+								>
+								<InboxEntry
+									item={item}
+									isActive={activeChatId === item.chatId}
+									onSelect={() => setActiveChatId(item.chatId)}
+									onTogglePin={() => handleTogglePin(item.chatId)}
+									onToggleMute={() => handleToggleMute(item.chatId, item.isMuted)}
+									onDeleteOrLeave={() => setConfirmAction({ chatId: item.chatId, chatType: item.chatType })}
+								/>
+								</div>
+							);
+						})}
+					</div>
 				)}
 			</div>
 
 			{showNewChat && <NewChatDialog onClose={() => setShowNewChat(false)} />}
 			{showProfile && <ProfileDialog onClose={() => setShowProfile(false)} />}
 			{showContacts && <ContactsDialog onClose={() => setShowContacts(false)} />}
+
+			<AlertDialog.Root open={!!confirmAction} onOpenChange={(open) => !open && setConfirmAction(null)}>
+				<AlertDialog.Portal>
+					<AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/50 animate-[overlay-show_150ms_ease-out]" />
+					<AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-xl bg-surface p-6 shadow-xl animate-[content-show_200ms_ease-out]">
+						<AlertDialog.Title className="text-base font-semibold text-text-primary">
+							{confirmAction?.chatType === 1 ? "Leave group?" : "Delete chat?"}
+						</AlertDialog.Title>
+						<AlertDialog.Description className="mt-2 text-sm text-text-secondary">
+							{confirmAction?.chatType === 1
+								? "You will no longer receive messages from this group."
+								: "This chat and its messages will be permanently deleted."}
+						</AlertDialog.Description>
+						<div className="mt-5 flex justify-end gap-3">
+							<AlertDialog.Cancel className="rounded-lg px-4 py-2 text-sm font-medium text-text-secondary hover:bg-surface-hover">
+								Cancel
+							</AlertDialog.Cancel>
+							<AlertDialog.Action
+								onClick={() => {
+									if (confirmAction) {
+										executeDeleteOrLeave(confirmAction.chatId, confirmAction.chatType);
+									}
+								}}
+								className="rounded-lg bg-danger px-4 py-2 text-sm font-medium text-white hover:bg-danger/90"
+							>
+								{confirmAction?.chatType === 1 ? "Leave" : "Delete"}
+							</AlertDialog.Action>
+						</div>
+					</AlertDialog.Content>
+				</AlertDialog.Portal>
+			</AlertDialog.Root>
 		</aside>
 	);
 }
@@ -144,13 +260,21 @@ const InboxEntry = memo(function InboxEntry({
 	isActive,
 	onSelect,
 	onTogglePin,
+	onToggleMute,
+	onDeleteOrLeave,
 }: {
 	item: InboxItem;
 	isActive: boolean;
 	onSelect: () => void;
 	onTogglePin: () => void;
+	onToggleMute: () => void;
+	onDeleteOrLeave: () => void;
 }) {
 	const displayName = getInboxDisplayName(item);
+	const otherUserId = item.chatType === 0 ? item.otherUserId : null;
+	const isOnline = useChatStore((s) =>
+		otherUserId ? (s.presence.get(otherUserId)?.isOnline ?? false) : false,
+	);
 
 	return (
 		<div
@@ -164,9 +288,7 @@ const InboxEntry = memo(function InboxEntry({
 					<div
 						className={cn(
 							"flex h-12 w-12 shrink-0 items-center justify-center rounded-full font-semibold",
-							item.chatType === 1
-								? "bg-success/20 text-success"
-								: "bg-primary/20 text-primary",
+							item.chatType === 1 ? "bg-success/20 text-success" : "bg-primary/20 text-primary",
 						)}
 					>
 						{displayName.charAt(0)?.toUpperCase() ?? "?"}
@@ -176,12 +298,13 @@ const InboxEntry = memo(function InboxEntry({
 							<Users size={10} className="text-text-muted" />
 						</div>
 					)}
+					{item.chatType === 0 && isOnline && (
+						<div className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface bg-success" />
+					)}
 				</div>
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center justify-between">
-						<span className="truncate font-medium text-text-primary">
-							{displayName}
-						</span>
+						<span className="truncate font-medium text-text-primary">{displayName}</span>
 						{item.lastActivity && (
 							<span className="ml-2 shrink-0 text-xs text-text-muted">
 								{formatDistanceToNow(new Date(item.lastActivity), {
@@ -191,11 +314,14 @@ const InboxEntry = memo(function InboxEntry({
 						)}
 					</div>
 					<div className="flex items-center justify-between">
-						<span className="truncate text-sm text-text-secondary">
-							{getMessagePreview(item)}
-						</span>
+						<span className="truncate text-sm text-text-secondary">{getMessagePreview(item)}</span>
 						{item.unreadCount > 0 && (
-							<span className="ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-xs font-medium text-white">
+							<span
+								className={cn(
+									"ml-2 flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full px-1.5 text-xs font-medium text-white",
+									item.isMuted ? "bg-text-muted" : "bg-primary",
+								)}
+							>
 								{item.unreadCount > 99 ? "99+" : item.unreadCount}
 							</span>
 						)}
@@ -203,24 +329,56 @@ const InboxEntry = memo(function InboxEntry({
 				</div>
 			</button>
 
-			<button
-				type="button"
-				onClick={(e) => {
-					e.stopPropagation();
-					onTogglePin();
-				}}
-				className={cn(
-					"shrink-0 rounded p-1 transition-opacity",
-					item.isPinned
-						? "text-primary opacity-100"
-						: "text-text-muted opacity-0 group-hover:opacity-100",
-					"hover:bg-surface-hover",
-				)}
-				title={item.isPinned ? "Unpin chat" : "Pin chat"}
-				aria-label={item.isPinned ? "Unpin chat" : "Pin chat"}
-			>
-				{item.isPinned ? <PinOff size={14} /> : <Pin size={14} />}
-			</button>
+			{item.isPinned && (
+				<Pin size={14} className="shrink-0 text-primary lg:hidden" />
+			)}
+
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger asChild>
+					<button
+						type="button"
+						onClick={(e) => e.stopPropagation()}
+						className={cn(
+							"flex min-h-9 min-w-9 shrink-0 items-center justify-center rounded-lg text-text-muted transition-opacity",
+							"hover:bg-surface-hover hover:text-text-primary",
+							"lg:opacity-0 lg:group-hover:opacity-100",
+						)}
+						aria-label="Chat actions"
+					>
+						<MoreVertical size={16} />
+					</button>
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Portal>
+					<DropdownMenu.Content
+						align="end"
+						sideOffset={4}
+						className="z-50 min-w-[160px] rounded-lg border border-border bg-surface p-1 shadow-lg animate-[slide-up_150ms_ease-out]"
+					>
+						<DropdownMenu.Item
+							onSelect={onTogglePin}
+							className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-text-primary outline-none hover:bg-surface-hover focus:bg-surface-hover"
+						>
+							{item.isPinned ? <PinOff size={15} /> : <Pin size={15} />}
+							{item.isPinned ? "Unpin" : "Pin"}
+						</DropdownMenu.Item>
+						<DropdownMenu.Item
+							onSelect={onToggleMute}
+							className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-text-primary outline-none hover:bg-surface-hover focus:bg-surface-hover"
+						>
+							<BellOff size={15} />
+							{item.isMuted ? "Unmute" : "Mute"}
+						</DropdownMenu.Item>
+						<DropdownMenu.Separator className="my-1 h-px bg-border" />
+						<DropdownMenu.Item
+							onSelect={onDeleteOrLeave}
+							className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-danger outline-none hover:bg-danger/10 focus:bg-danger/10"
+						>
+							<Trash2 size={15} />
+							{item.chatType === 1 ? "Leave group" : "Delete chat"}
+						</DropdownMenu.Item>
+					</DropdownMenu.Content>
+				</DropdownMenu.Portal>
+			</DropdownMenu.Root>
 		</div>
 	);
 });

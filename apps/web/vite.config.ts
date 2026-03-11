@@ -10,6 +10,10 @@ export default defineConfig({
 			"@": resolve(__dirname, "./src"),
 		},
 	},
+	build: {
+		sourcemap: true,
+		chunkSizeWarningLimit: 300,
+	},
 	server: {
 		port: 5173,
 		proxy: {

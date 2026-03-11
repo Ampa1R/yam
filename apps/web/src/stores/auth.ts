@@ -23,9 +23,21 @@ export const useAuthStore = create<AuthState>((set) => ({
 	},
 
 	logout: () => {
+		const refreshToken = localStorage.getItem("refreshToken");
+		const accessToken = localStorage.getItem("accessToken");
 		localStorage.removeItem("accessToken");
 		localStorage.removeItem("refreshToken");
 		set({ user: null, isAuthenticated: false });
+		if (accessToken) {
+			fetch("/api/auth/logout", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${accessToken}`,
+				},
+				body: refreshToken ? JSON.stringify({ refreshToken }) : "{}",
+			}).catch(() => {});
+		}
 	},
 
 	hydrate: () => {
