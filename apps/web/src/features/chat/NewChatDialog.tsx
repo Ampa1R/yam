@@ -36,16 +36,32 @@ export function NewChatDialog({ onClose }: Props) {
 	});
 
 	const createDirectChat = useMutation({
-		mutationFn: (userId: string) =>
+		mutationFn: (user: SearchUser) =>
 			eden(
 				api.api.chats.post({
 					type: ChatType.DIRECT,
-					memberIds: [userId],
+					memberIds: [user.id],
 				}),
 			),
-		onSuccess: (data) => {
+		onSuccess: (data, user) => {
 			const chat = (data as { chat: { id: string } }).chat;
-			if (chat) setActiveChatId(chat.id);
+			if (chat) {
+				setActiveChatId(chat.id);
+				useChatStore.getState().addInboxItem({
+					chatId: chat.id,
+					chatType: ChatType.DIRECT,
+					chatName: user.displayName,
+					chatAvatar: user.avatarUrl,
+					otherUserId: user.id,
+					lastMsgSender: null,
+					lastMsgType: null,
+					lastMsgPreview: null,
+					lastActivity: new Date().toISOString(),
+					unreadCount: 0,
+					isPinned: false,
+					isMuted: false,
+				});
+			}
 			queryClient.invalidateQueries({ queryKey: ["inbox"] });
 			onClose();
 		},
@@ -62,7 +78,23 @@ export function NewChatDialog({ onClose }: Props) {
 			),
 		onSuccess: (data) => {
 			const chat = (data as { chat: { id: string } }).chat;
-			if (chat) setActiveChatId(chat.id);
+			if (chat) {
+				setActiveChatId(chat.id);
+				useChatStore.getState().addInboxItem({
+					chatId: chat.id,
+					chatType: ChatType.GROUP,
+					chatName: groupName,
+					chatAvatar: null,
+					otherUserId: null,
+					lastMsgSender: null,
+					lastMsgType: null,
+					lastMsgPreview: null,
+					lastActivity: new Date().toISOString(),
+					unreadCount: 0,
+					isPinned: false,
+					isMuted: false,
+				});
+			}
 			queryClient.invalidateQueries({ queryKey: ["inbox"] });
 			onClose();
 		},
@@ -81,7 +113,7 @@ export function NewChatDialog({ onClose }: Props) {
 		<Dialog.Root open onOpenChange={(open) => !open && onClose()}>
 			<Dialog.Portal>
 				<Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 animate-[overlay-show_150ms_ease-out]" />
-				<Dialog.Content className="fixed z-50 w-[calc(100%-2rem)] max-w-md rounded-2xl bg-surface p-6 shadow-xl inset-x-4 top-[5vh] max-h-[90vh] overflow-y-auto lg:inset-x-auto lg:left-1/2 lg:top-1/2 lg:-translate-x-1/2 lg:-translate-y-1/2 animate-[content-show-mobile_200ms_ease-out] lg:animate-[content-show_200ms_ease-out]">
+				<Dialog.Content className="fixed z-50 w-[calc(100%-2rem)] max-w-md rounded-2xl bg-surface p-6 shadow-xl inset-x-4 top-[5vh] max-h-[90vh] overflow-y-auto lg:inset-auto lg:left-1/2 lg:top-1/2 lg:-translate-x-1/2 lg:-translate-y-1/2 animate-[content-show-mobile_200ms_ease-out] lg:animate-[content-show_200ms_ease-out]">
 					<div className="mb-4 flex items-center justify-between">
 						<div className="flex items-center gap-2">
 							{mode !== "select" && (
@@ -173,7 +205,7 @@ export function NewChatDialog({ onClose }: Props) {
 									<button
 										type="button"
 										key={user.id}
-										onClick={() => createDirectChat.mutate(user.id)}
+										onClick={() => createDirectChat.mutate(user)}
 										disabled={createDirectChat.isPending}
 										className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-surface-hover"
 									>

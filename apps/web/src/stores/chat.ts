@@ -71,30 +71,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
 			const localMap = new Map(state.inbox.map((item) => [item.chatId, item]));
 			const apiIds = new Set(apiInbox.map((item) => item.chatId));
 
-			const merged = apiInbox.map((apiItem) => {
-				const local = localMap.get(apiItem.chatId);
-				if (!local) return apiItem;
+		const merged = apiInbox.map((apiItem) => {
+			const local = localMap.get(apiItem.chatId);
+			if (!local) return apiItem;
 
-				const localTime = new Date(local.lastActivity).getTime();
-				const apiTime = new Date(apiItem.lastActivity).getTime();
+			const localTime = new Date(local.lastActivity).getTime();
+			const apiTime = new Date(apiItem.lastActivity).getTime();
 
-				if (localTime > apiTime) {
-					return {
-						...apiItem,
-						lastMsgPreview: local.lastMsgPreview,
-						lastMsgSender: local.lastMsgSender,
-						lastMsgType: local.lastMsgType,
-						lastActivity: local.lastActivity,
-						unreadCount: local.unreadCount,
-					};
-				}
+			if (localTime >= apiTime && local.lastMsgPreview && !apiItem.lastMsgPreview) {
+				return {
+					...apiItem,
+					lastMsgPreview: local.lastMsgPreview,
+					lastMsgSender: local.lastMsgSender,
+					lastMsgType: local.lastMsgType,
+					lastActivity: local.lastActivity,
+					unreadCount: local.unreadCount,
+				};
+			}
 
-				if (local.unreadCount === 0 && apiItem.unreadCount > 0 && apiTime <= localTime) {
-					return { ...apiItem, unreadCount: 0 };
-				}
+			if (localTime > apiTime) {
+				return {
+					...apiItem,
+					lastMsgPreview: local.lastMsgPreview,
+					lastMsgSender: local.lastMsgSender,
+					lastMsgType: local.lastMsgType,
+					lastActivity: local.lastActivity,
+					unreadCount: local.unreadCount,
+				};
+			}
 
-				return apiItem;
-			});
+			if (local.unreadCount === 0 && apiItem.unreadCount > 0 && apiTime <= localTime) {
+				return { ...apiItem, unreadCount: 0 };
+			}
+
+			return apiItem;
+		});
 
 			const WS_ONLY_RETENTION_MS = 30_000;
 			const now = Date.now();

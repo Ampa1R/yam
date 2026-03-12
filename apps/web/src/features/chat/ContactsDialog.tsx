@@ -52,16 +52,32 @@ export function ContactsDialog({ onClose }: Props) {
 	});
 
 	const startChat = useMutation({
-		mutationFn: (userId: string) =>
+		mutationFn: (contact: { id: string; displayName: string; avatarUrl: string | null }) =>
 			eden(
 				api.api.chats.post({
 					type: ChatType.DIRECT,
-					memberIds: [userId],
+					memberIds: [contact.id],
 				}),
 			),
-		onSuccess: (data) => {
+		onSuccess: (data, contact) => {
 			const chat = (data as { chat: { id: string } }).chat;
-			if (chat) setActiveChatId(chat.id);
+			if (chat) {
+				setActiveChatId(chat.id);
+				useChatStore.getState().addInboxItem({
+					chatId: chat.id,
+					chatType: ChatType.DIRECT,
+					chatName: contact.displayName,
+					chatAvatar: contact.avatarUrl,
+					otherUserId: contact.id,
+					lastMsgSender: null,
+					lastMsgType: null,
+					lastMsgPreview: null,
+					lastActivity: new Date().toISOString(),
+					unreadCount: 0,
+					isPinned: false,
+					isMuted: false,
+				});
+			}
 			queryClient.invalidateQueries({ queryKey: ["inbox"] });
 			onClose();
 		},
@@ -79,7 +95,7 @@ export function ContactsDialog({ onClose }: Props) {
 		<Dialog.Root open onOpenChange={(open) => !open && onClose()}>
 			<Dialog.Portal>
 				<Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 animate-[overlay-show_150ms_ease-out]" />
-				<Dialog.Content className="fixed z-50 w-[calc(100%-2rem)] max-w-md rounded-2xl bg-surface p-6 shadow-xl inset-x-4 top-[5vh] max-h-[90vh] overflow-y-auto lg:inset-x-auto lg:left-1/2 lg:top-1/2 lg:-translate-x-1/2 lg:-translate-y-1/2 animate-[content-show-mobile_200ms_ease-out] lg:animate-[content-show_200ms_ease-out]">
+				<Dialog.Content className="fixed z-50 w-[calc(100%-2rem)] max-w-md rounded-2xl bg-surface p-6 shadow-xl inset-x-4 top-[5vh] max-h-[90vh] overflow-y-auto lg:inset-auto lg:left-1/2 lg:top-1/2 lg:-translate-x-1/2 lg:-translate-y-1/2 animate-[content-show-mobile_200ms_ease-out] lg:animate-[content-show_200ms_ease-out]">
 					<div className="mb-4 flex items-center justify-between">
 						<Dialog.Title className="text-lg font-semibold text-text-primary">Contacts</Dialog.Title>
 						<Dialog.Close className="rounded-lg p-1 hover:bg-surface-hover" aria-label="Close">
@@ -181,7 +197,7 @@ export function ContactsDialog({ onClose }: Props) {
 										<div className="flex gap-1">
 											<button
 												type="button"
-												onClick={() => startChat.mutate(contact.contactId)}
+												onClick={() => startChat.mutate({ id: contact.contactId, displayName: contact.user.displayName, avatarUrl: contact.user.avatarUrl ?? null })}
 												disabled={startChat.isPending}
 												className="rounded-lg p-1.5 text-text-secondary hover:bg-primary/10 hover:text-primary"
 												title="Message"

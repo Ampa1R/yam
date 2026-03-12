@@ -51,60 +51,65 @@ export function useWebSocket() {
 	const handleEvent = useCallback((event: ServerEvent) => {
 		const store = storeRef.current;
 		switch (event.event) {
-			case "message:new": {
-				store.addMessage(event.data.chatId, event.data);
-				const preview =
-					event.data.content.slice(0, 100) ||
-					(event.data.type === MessageType.VOICE ? "🎤 Voice message"
-						: event.data.attachments.length > 0 ? "📎 Attachment" : "");
-				const isActiveChat = useChatStore.getState().activeChatId === event.data.chatId;
-				const currentItem = store.inbox.find((i) => i.chatId === event.data.chatId);
+		case "message:new": {
+			store.addMessage(event.data.chatId, event.data);
+			const preview =
+				event.data.content.slice(0, 100) ||
+				(event.data.type === MessageType.VOICE ? "🎤 Voice message"
+					: event.data.attachments.length > 0 ? "📎 Attachment" : "");
+			const isActiveChat = useChatStore.getState().activeChatId === event.data.chatId;
+			const currentItem = store.inbox.find((i) => i.chatId === event.data.chatId);
+			if (currentItem) {
 				const inboxUpdate: Record<string, unknown> = {
 					lastMsgPreview: preview,
 					lastMsgSender: event.data.senderId,
 					lastMsgType: event.data.type,
 					lastActivity: event.data.createdAt,
 				};
-				if (!isActiveChat && currentItem) {
+				if (!isActiveChat) {
 					inboxUpdate.unreadCount = (currentItem.unreadCount ?? 0) + 1;
 				}
-				if (currentItem) {
-					store.updateInboxItem(event.data.chatId, inboxUpdate);
-				} else {
-					void queryClient.invalidateQueries({ queryKey: ["inbox"] }).then(() => {
-						const state = useChatStore.getState();
-						const exists = state.inbox.find((i) => i.chatId === event.data.chatId);
-						if (exists) {
-							state.updateInboxItem(event.data.chatId, inboxUpdate);
-						}
-					});
-				}
-				break;
+				store.updateInboxItem(event.data.chatId, inboxUpdate);
+			} else {
+				store.addInboxItem({
+					chatId: event.data.chatId,
+					chatType: 0,
+					chatName: null,
+					chatAvatar: null,
+					otherUserId: event.data.senderId,
+					lastMsgSender: event.data.senderId,
+					lastMsgType: event.data.type,
+					lastMsgPreview: preview,
+					lastActivity: event.data.createdAt,
+					unreadCount: isActiveChat ? 0 : 1,
+					isPinned: false,
+					isMuted: false,
+				});
+				void queryClient.invalidateQueries({ queryKey: ["inbox"] });
 			}
-			case "message:ack": {
-				const pending = useChatStore.getState().pendingMessages.get(event.data.clientId);
-				store.confirmMessage(event.data.clientId, event.data.messageId, event.data.createdAt);
-				if (pending) {
-					const ackPreview =
-						pending.message.content.slice(0, 100) ||
-						(pending.message.attachments.length > 0 ? "Attachment" : "");
-					const ackUpdate = {
-						lastMsgPreview: ackPreview,
-						lastMsgSender: pending.message.senderId,
-						lastMsgType: pending.message.type,
-						lastActivity: event.data.createdAt,
-					};
-					const existsInInbox = useChatStore.getState().inbox.some((i) => i.chatId === pending.chatId);
-					if (existsInInbox) {
-						store.updateInboxItem(pending.chatId, ackUpdate);
-					} else {
-						void queryClient.invalidateQueries({ queryKey: ["inbox"] }).then(() => {
-							useChatStore.getState().updateInboxItem(pending.chatId, ackUpdate);
-						});
-					}
+			break;
+		}
+		case "message:ack": {
+			const pending = useChatStore.getState().pendingMessages.get(event.data.clientId);
+			store.confirmMessage(event.data.clientId, event.data.messageId, event.data.createdAt);
+			if (pending) {
+				const ackPreview =
+					pending.message.content.slice(0, 100) ||
+					(pending.message.type === MessageType.VOICE ? "🎤 Voice message"
+						: pending.message.attachments.length > 0 ? "📎 Attachment" : "");
+				const ackUpdate = {
+					lastMsgPreview: ackPreview,
+					lastMsgSender: pending.message.senderId,
+					lastMsgType: pending.message.type,
+					lastActivity: event.data.createdAt,
+				};
+				store.updateInboxItem(pending.chatId, ackUpdate);
+				if (!useChatStore.getState().inbox.some((i) => i.chatId === pending.chatId)) {
+					void queryClient.invalidateQueries({ queryKey: ["inbox"] });
 				}
-				break;
 			}
+			break;
+		}
 			case "message:updated":
 				store.updateMessage(event.data.chatId, event.data.messageId, {
 					content: event.data.content,
