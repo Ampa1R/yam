@@ -35,69 +35,51 @@ export function NewChatDialog({ onClose }: Props) {
 		enabled: debouncedSearch.length >= 2,
 	});
 
+	const handleChatCreated = (data: unknown, inboxOverrides: { chatType: ChatType; chatName: string; chatAvatar: string | null; otherUserId: string | null }) => {
+		const chat = (data as { chat: { id: string } }).chat;
+		if (chat) {
+			setActiveChatId(chat.id);
+			useChatStore.getState().addInboxItem({
+				chatId: chat.id,
+				chatName: inboxOverrides.chatName,
+				chatType: inboxOverrides.chatType,
+				chatAvatar: inboxOverrides.chatAvatar,
+				otherUserId: inboxOverrides.otherUserId,
+				lastMsgSender: null,
+				lastMsgType: null,
+				lastMsgPreview: null,
+				lastActivity: new Date().toISOString(),
+				unreadCount: 0,
+				isPinned: false,
+				isMuted: false,
+			});
+		}
+		queryClient.invalidateQueries({ queryKey: ["inbox"] });
+		onClose();
+	};
+
 	const createDirectChat = useMutation({
 		mutationFn: (user: SearchUser) =>
-			eden(
-				api.api.chats.post({
-					type: ChatType.DIRECT,
-					memberIds: [user.id],
-				}),
-			),
-		onSuccess: (data, user) => {
-			const chat = (data as { chat: { id: string } }).chat;
-			if (chat) {
-				setActiveChatId(chat.id);
-				useChatStore.getState().addInboxItem({
-					chatId: chat.id,
-					chatType: ChatType.DIRECT,
-					chatName: user.displayName,
-					chatAvatar: user.avatarUrl,
-					otherUserId: user.id,
-					lastMsgSender: null,
-					lastMsgType: null,
-					lastMsgPreview: null,
-					lastActivity: new Date().toISOString(),
-					unreadCount: 0,
-					isPinned: false,
-					isMuted: false,
-				});
-			}
-			queryClient.invalidateQueries({ queryKey: ["inbox"] });
-			onClose();
-		},
+			eden(api.api.chats.post({ type: ChatType.DIRECT, memberIds: [user.id] })),
+		onSuccess: (data, user) =>
+			handleChatCreated(data, {
+				chatType: ChatType.DIRECT,
+				chatName: user.displayName,
+				chatAvatar: user.avatarUrl,
+				otherUserId: user.id,
+			}),
 	});
 
 	const createGroupChat = useMutation({
 		mutationFn: () =>
-			eden(
-				api.api.chats.post({
-					type: ChatType.GROUP,
-					memberIds: selectedMembers.map((m) => m.id),
-					name: groupName,
-				}),
-			),
-		onSuccess: (data) => {
-			const chat = (data as { chat: { id: string } }).chat;
-			if (chat) {
-				setActiveChatId(chat.id);
-				useChatStore.getState().addInboxItem({
-					chatId: chat.id,
-					chatType: ChatType.GROUP,
-					chatName: groupName,
-					chatAvatar: null,
-					otherUserId: null,
-					lastMsgSender: null,
-					lastMsgType: null,
-					lastMsgPreview: null,
-					lastActivity: new Date().toISOString(),
-					unreadCount: 0,
-					isPinned: false,
-					isMuted: false,
-				});
-			}
-			queryClient.invalidateQueries({ queryKey: ["inbox"] });
-			onClose();
-		},
+			eden(api.api.chats.post({ type: ChatType.GROUP, memberIds: selectedMembers.map((m) => m.id), name: groupName })),
+		onSuccess: (data) =>
+			handleChatCreated(data, {
+				chatType: ChatType.GROUP,
+				chatName: groupName,
+				chatAvatar: null,
+				otherUserId: null,
+			}),
 	});
 
 	const toggleMember = (user: SearchUser) => {

@@ -9,7 +9,7 @@ import type {
 	SendMessagePayload,
 	ServerEvent,
 } from "@yam/shared";
-import { ChatType, Limits, MessageStatus, MessageType } from "@yam/shared";
+import { type ChatType, Limits, MessageStatus, MessageType } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
 
@@ -40,6 +40,37 @@ function sendError(userId: string, code: string, message: string): void {
 		},
 		eventId: randomUUID(),
 	});
+}
+
+function splitLocalRemote(memberIds: string[]) {
+	const local: string[] = [];
+	const remote: string[] = [];
+	for (const id of memberIds) {
+		(connectionManager.isLocal(id) ? local : remote).push(id);
+	}
+	return { local, remote };
+}
+
+async function broadcastToMembers(memberIds: string[], event: ServerEvent): Promise<void> {
+	const { local, remote } = splitLocalRemote(memberIds);
+	connectionManager.sendToUsers(local, event);
+	if (remote.length > 0) await publishToUsers(remote, event);
+}
+
+function buildInboxPreview(msg: { senderId: string; type: number; content: string; createdAt: string }) {
+	return {
+		senderId: msg.senderId,
+		type: msg.type,
+		preview: (msg.content || "").slice(0, Limits.INBOX_PREVIEW_LENGTH),
+		createdAt: msg.createdAt,
+	};
+}
+
+function getPreviewText(content: string, type: number, attachments?: unknown[]): string {
+	if (content) return content.slice(0, Limits.INBOX_PREVIEW_LENGTH);
+	if (type === MessageType.VOICE) return "🎤 Voice message";
+	if (attachments && attachments.length > 0) return "📎 Attachment";
+	return "";
 }
 
 function isValidSendPayload(data: unknown): data is SendMessagePayload {
@@ -78,22 +109,59 @@ function isValidDeletePayload(data: unknown): data is DeleteMessagePayload {
 	);
 }
 
+async function checkBlockedInDirect(
+	userId: string,
+	memberIds: string[],
+	chatType: number | undefined,
+): Promise<boolean> {
+	if (chatType !== 0) return false;
+	const otherId = memberIds.find((id) => id !== userId);
+	if (!otherId) return false;
+
+	const [blocked] = await db
+		.select()
+		.from(schema.blockedUsers)
+		.where(
+			and(
+				eq(schema.blockedUsers.userId, otherId),
+				eq(schema.blockedUsers.blockedId, userId),
+			),
+		)
+		.limit(1);
+	return !!blocked;
+}
+
+async function canDeleteOthersMessage(userId: string, chatId: string): Promise<boolean> {
+	const memberIds = await getChatMemberIds(chatId);
+	if (!memberIds.includes(userId)) return false;
+
+	const [membership] = await db
+		.select({ role: schema.chatMembers.role })
+		.from(schema.chatMembers)
+		.where(
+			and(
+				eq(schema.chatMembers.chatId, chatId),
+				eq(schema.chatMembers.userId, userId),
+			),
+		)
+		.limit(1);
+
+	return !!membership && membership.role >= 1;
+}
+
 export async function handleSendMessage(userId: string, data: unknown): Promise<void> {
 	if (!isValidSendPayload(data)) {
 		sendError(userId, "INVALID_PAYLOAD", "Invalid message:send payload");
 		return;
 	}
-
 	if (data.content.length > Limits.MAX_MESSAGE_LENGTH) {
 		sendError(userId, "MESSAGE_TOO_LONG", `Message exceeds ${Limits.MAX_MESSAGE_LENGTH} characters`);
 		return;
 	}
-
 	if (data.type < MessageType.TEXT || data.type > MessageType.VOICE) {
 		sendError(userId, "INVALID_TYPE", "Invalid message type");
 		return;
 	}
-
 	if (data.attachments && data.attachments.length > 10) {
 		sendError(userId, "INVALID_PAYLOAD", "Maximum 10 attachments per message");
 		return;
@@ -121,25 +189,9 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		.where(eq(schema.chats.id, data.chatId))
 		.limit(1);
 
-	if (chat?.type === 0) {
-		const otherId = memberIds.find((id) => id !== userId);
-		if (otherId) {
-			const [blocked] = await db
-				.select()
-				.from(schema.blockedUsers)
-				.where(
-					and(
-						eq(schema.blockedUsers.userId, otherId),
-						eq(schema.blockedUsers.blockedId, userId),
-					),
-				)
-				.limit(1);
-
-			if (blocked) {
-				sendError(userId, "BLOCKED", "You cannot send messages to this user");
-				return;
-			}
-		}
+	if (await checkBlockedInDirect(userId, memberIds, chat?.type)) {
+		sendError(userId, "BLOCKED", "You cannot send messages to this user");
+		return;
 	}
 
 	const attachments: Attachment[] | undefined = data.attachments?.map((a) => ({
@@ -176,24 +228,12 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 
 	const otherMembers = memberIds.filter((id) => id !== userId);
 
-	const localRecipients: string[] = [];
-	const remoteRecipients: string[] = [];
-
-	for (const memberId of otherMembers) {
-		if (connectionManager.isLocal(memberId)) {
-			localRecipients.push(memberId);
-		} else {
-			remoteRecipients.push(memberId);
-		}
-	}
-
-	const newMsgEvent: ServerEvent = { event: "message:new", data: { ...message, chatType: chat!.type as ChatType }, eventId: randomUUID() };
-
-	connectionManager.sendToUsers(localRecipients, newMsgEvent);
-
-	if (remoteRecipients.length > 0) {
-		await publishToUsers(remoteRecipients, newMsgEvent);
-	}
+	const newMsgEvent: ServerEvent = {
+		event: "message:new",
+		data: { ...message, chatType: chat?.type as ChatType },
+		eventId: randomUUID(),
+	};
+	await broadcastToMembers(otherMembers, newMsgEvent);
 
 	for (const memberId of otherMembers) {
 		const isOnline = connectionManager.isLocal(memberId) || (await userConnections.isConnected(memberId));
@@ -216,9 +256,7 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		});
 	}
 
-	let preview = (data.content || "").slice(0, Limits.INBOX_PREVIEW_LENGTH);
-	if (!preview && data.type === MessageType.VOICE) preview = "🎤 Voice message";
-	else if (!preview && attachments && attachments.length > 0) preview = "📎 Attachment";
+	const preview = getPreviewText(data.content, data.type, attachments);
 	await queues.inboxFanout.add({
 		chatId: data.chatId,
 		senderId: userId,
@@ -233,14 +271,12 @@ export async function handleEditMessage(userId: string, data: unknown): Promise<
 		sendError(userId, "INVALID_PAYLOAD", "Invalid message:edit payload");
 		return;
 	}
-
 	if (data.content.length > Limits.MAX_MESSAGE_LENGTH) {
 		sendError(userId, "MESSAGE_TOO_LONG", `Message exceeds ${Limits.MAX_MESSAGE_LENGTH} characters`);
 		return;
 	}
 
 	const bucket = scyllaQueries.bucketFromTimeuuid(data.messageId);
-
 	const existing = await scyllaQueries.getMessage(data.chatId, data.messageId, bucket);
 	if (!existing) {
 		sendError(userId, "NOT_FOUND", "Message not found");
@@ -259,38 +295,23 @@ export async function handleEditMessage(userId: string, data: unknown): Promise<
 
 	const memberIds = await getChatMemberIds(data.chatId);
 	const editedAt = new Date().toISOString();
-	const event: ServerEvent = {
+	await broadcastToMembers(memberIds, {
 		event: "message:updated",
-		data: {
-			messageId: data.messageId,
-			chatId: data.chatId,
-			content: data.content,
-			editedAt,
-		},
+		data: { messageId: data.messageId, chatId: data.chatId, content: data.content, editedAt },
 		eventId: randomUUID(),
-	};
-
-	const localMembers = memberIds.filter((id) => connectionManager.isLocal(id));
-	const remoteMembers = memberIds.filter((id) => !connectionManager.isLocal(id));
-	connectionManager.sendToUsers(localMembers, event);
-	if (remoteMembers.length > 0) {
-		await publishToUsers(remoteMembers, event);
-	}
+	});
 
 	const [latestMsg] = await scyllaQueries.getMessages(data.chatId, 1);
 	if (latestMsg && latestMsg.id === data.messageId) {
-		const preview = data.content.slice(0, Limits.INBOX_PREVIEW_LENGTH);
-		const inboxEvent: ServerEvent = {
+		await broadcastToMembers(memberIds, {
 			event: "chat:updated",
 			data: {
 				chatId: data.chatId,
-				lastMessage: { senderId: existing.senderId, type: existing.type, preview, createdAt: existing.createdAt },
+				lastMessage: buildInboxPreview({ ...existing, content: data.content }),
 				unreadCount: -1,
 			},
 			eventId: randomUUID(),
-		};
-		connectionManager.sendToUsers(localMembers, inboxEvent);
-		if (remoteMembers.length > 0) await publishToUsers(remoteMembers, inboxEvent);
+		});
 	}
 }
 
@@ -301,29 +322,14 @@ export async function handleDeleteMessage(userId: string, data: unknown): Promis
 	}
 
 	const bucket = scyllaQueries.bucketFromTimeuuid(data.messageId);
-
 	const existing = await scyllaQueries.getMessage(data.chatId, data.messageId, bucket);
 	if (!existing) {
 		sendError(userId, "NOT_FOUND", "Message not found");
 		return;
 	}
+
 	if (existing.senderId !== userId) {
-		const memberIds = await getChatMemberIds(data.chatId);
-		if (!memberIds.includes(userId)) {
-			sendError(userId, "FORBIDDEN", "Not a member of this chat");
-			return;
-		}
-		const [membership] = await db
-			.select({ role: schema.chatMembers.role })
-			.from(schema.chatMembers)
-			.where(
-				and(
-					eq(schema.chatMembers.chatId, data.chatId),
-					eq(schema.chatMembers.userId, userId),
-				),
-			)
-			.limit(1);
-		if (!membership || membership.role < 1) {
+		if (!(await canDeleteOthersMessage(userId, data.chatId))) {
 			sendError(userId, "FORBIDDEN", "You can only delete your own messages");
 			return;
 		}
@@ -332,32 +338,21 @@ export async function handleDeleteMessage(userId: string, data: unknown): Promis
 	await scyllaQueries.softDeleteMessage(data.chatId, data.messageId, bucket);
 
 	const memberIds = await getChatMemberIds(data.chatId);
-	const event: ServerEvent = {
+	await broadcastToMembers(memberIds, {
 		event: "message:deleted",
 		data: { messageId: data.messageId, chatId: data.chatId },
 		eventId: randomUUID(),
-	};
-
-	const localMembers = memberIds.filter((id) => connectionManager.isLocal(id));
-	const remoteMembers = memberIds.filter((id) => !connectionManager.isLocal(id));
-	connectionManager.sendToUsers(localMembers, event);
-	if (remoteMembers.length > 0) {
-		await publishToUsers(remoteMembers, event);
-	}
+	});
 
 	const recent = await scyllaQueries.getMessages(data.chatId, 3);
 	const latestActive = recent.find((m) => !m.isDeleted && m.id !== data.messageId);
-	const inboxEvent: ServerEvent = {
+	await broadcastToMembers(memberIds, {
 		event: "chat:updated",
 		data: {
 			chatId: data.chatId,
-			lastMessage: latestActive
-				? { senderId: latestActive.senderId, type: latestActive.type, preview: (latestActive.content || "").slice(0, Limits.INBOX_PREVIEW_LENGTH), createdAt: latestActive.createdAt }
-				: null,
+			lastMessage: latestActive ? buildInboxPreview(latestActive) : null,
 			unreadCount: -1,
 		},
 		eventId: randomUUID(),
-	};
-	connectionManager.sendToUsers(localMembers, inboxEvent);
-	if (remoteMembers.length > 0) await publishToUsers(remoteMembers, inboxEvent);
+	});
 }

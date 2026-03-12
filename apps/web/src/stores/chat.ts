@@ -22,7 +22,41 @@ interface WsErrorInfo {
 	scope?: "auth" | "chat" | "message" | "system";
 }
 
-interface ChatState {
+function sortInbox(items: InboxItem[]): InboxItem[] {
+	return items.sort((a, b) => {
+		if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+		return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
+	});
+}
+
+function mergeInboxItem(apiItem: InboxItem, local: InboxItem | undefined): InboxItem {
+	if (!local) return apiItem;
+
+	const localTime = new Date(local.lastActivity).getTime();
+	const apiTime = new Date(apiItem.lastActivity).getTime();
+
+	const localHasFresherPreview = localTime >= apiTime && local.lastMsgPreview && !apiItem.lastMsgPreview;
+	const localIsNewer = localTime > apiTime;
+
+	if (localHasFresherPreview || localIsNewer) {
+		return {
+			...apiItem,
+			lastMsgPreview: local.lastMsgPreview,
+			lastMsgSender: local.lastMsgSender,
+			lastMsgType: local.lastMsgType,
+			lastActivity: local.lastActivity,
+			unreadCount: local.unreadCount,
+		};
+	}
+
+	if (local.unreadCount === 0 && apiItem.unreadCount > 0 && apiTime <= localTime) {
+		return { ...apiItem, unreadCount: 0 };
+	}
+
+	return apiItem;
+}
+
+export interface ChatState {
 	activeChatId: string | null;
 	inbox: InboxItem[];
 	messages: Map<string, Message[]>;
@@ -71,71 +105,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
 			const localMap = new Map(state.inbox.map((item) => [item.chatId, item]));
 			const apiIds = new Set(apiInbox.map((item) => item.chatId));
 
-		const merged = apiInbox.map((apiItem) => {
-			const local = localMap.get(apiItem.chatId);
-			if (!local) return apiItem;
-
-			const localTime = new Date(local.lastActivity).getTime();
-			const apiTime = new Date(apiItem.lastActivity).getTime();
-
-			if (localTime >= apiTime && local.lastMsgPreview && !apiItem.lastMsgPreview) {
-				return {
-					...apiItem,
-					lastMsgPreview: local.lastMsgPreview,
-					lastMsgSender: local.lastMsgSender,
-					lastMsgType: local.lastMsgType,
-					lastActivity: local.lastActivity,
-					unreadCount: local.unreadCount,
-				};
-			}
-
-			if (localTime > apiTime) {
-				return {
-					...apiItem,
-					lastMsgPreview: local.lastMsgPreview,
-					lastMsgSender: local.lastMsgSender,
-					lastMsgType: local.lastMsgType,
-					lastActivity: local.lastActivity,
-					unreadCount: local.unreadCount,
-				};
-			}
-
-			if (local.unreadCount === 0 && apiItem.unreadCount > 0 && apiTime <= localTime) {
-				return { ...apiItem, unreadCount: 0 };
-			}
-
-			return apiItem;
-		});
+			const merged = apiInbox.map((apiItem) =>
+				mergeInboxItem(apiItem, localMap.get(apiItem.chatId)),
+			);
 
 			const WS_ONLY_RETENTION_MS = 30_000;
 			const now = Date.now();
 			for (const [chatId, local] of localMap) {
 				if (apiIds.has(chatId)) continue;
-				const age = now - new Date(local.lastActivity).getTime();
-				if (age < WS_ONLY_RETENTION_MS) {
+				if (now - new Date(local.lastActivity).getTime() < WS_ONLY_RETENTION_MS) {
 					merged.push(local);
 				}
 			}
 
-			merged.sort((a, b) => {
-				if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-				return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
-			});
-
-			return { inbox: merged };
+			return { inbox: sortInbox(merged) };
 		}),
 
 	updateInboxItem: (chatId, updates) =>
-		set((state) => {
-			const updated = state.inbox.map((item) =>
-				item.chatId === chatId ? { ...item, ...updates } : item,
-			);
-			updated.sort((a, b) => {
-				if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-				return new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime();
-			});
-			return { inbox: updated };
-		}),
+		set((state) => ({
+			inbox: sortInbox(
+				state.inbox.map((item) =>
+					item.chatId === chatId ? { ...item, ...updates } : item,
+				),
+			),
+		})),
 
 	addInboxItem: (item) =>
 		set((state) => {
@@ -146,16 +139,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
 	togglePin: (chatId) =>
 		set((state) => ({
-			inbox: state.inbox
-				.map((item) =>
+			inbox: sortInbox(
+				state.inbox.map((item) =>
 					item.chatId === chatId ? { ...item, isPinned: !item.isPinned } : item,
-				)
-				.sort((a, b) => {
-					if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
-					return (
-						new Date(b.lastActivity).getTime() - new Date(a.lastActivity).getTime()
-					);
-				}),
+				),
+			),
 		})),
 
 	setMessages: (chatId, messages) =>

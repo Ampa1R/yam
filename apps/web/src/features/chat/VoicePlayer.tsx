@@ -160,6 +160,9 @@ export const VoicePlayer = memo(function VoicePlayer({ src, duration, waveform, 
 	const progress = totalDuration > 0 ? currentTime / totalDuration : 0;
 	const activeBar = Math.floor(progress * BARS);
 
+	const barActiveClass = isOwn ? "bg-white" : "bg-primary";
+	const barInactiveClass = isOwn ? "bg-white/30" : "bg-primary/25";
+
 	return (
 		<div className="flex items-center gap-2.5 py-1" style={{ minWidth: 220 }}>
 			<button
@@ -191,9 +194,7 @@ export const VoicePlayer = memo(function VoicePlayer({ src, duration, waveform, 
 							key={i}
 							className={cn(
 								"flex-1 rounded-sm transition-colors duration-75",
-								i <= activeBar
-									? isOwn ? "bg-white" : "bg-primary"
-									: isOwn ? "bg-white/30" : "bg-primary/25",
+								i <= activeBar ? barActiveClass : barInactiveClass,
 							)}
 							style={{
 								height: `${Math.max(8, (height / 100) * 28)}px`,

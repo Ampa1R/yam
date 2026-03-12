@@ -88,7 +88,7 @@ async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
 const baseUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost";
 
 export const api = treaty<App>(baseUrl, {
-	fetcher: authFetch,
+	fetcher: authFetch as typeof fetch,
 });
 
 export async function eden<T>(

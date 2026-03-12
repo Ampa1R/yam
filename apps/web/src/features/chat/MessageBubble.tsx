@@ -15,6 +15,26 @@ import { VoicePlayer } from "./VoicePlayer";
 
 const SWIPE_THRESHOLD = 60;
 
+function categorizeAttachments(attachments: Message["attachments"]) {
+	const voice = attachments.filter((a) => a.type === AttachmentTypeEnum.VOICE || a.mimeType.startsWith("audio/"));
+	const images = attachments.filter((a) => a.mimeType.startsWith("image/"));
+	const files = attachments.filter((a) => !a.mimeType.startsWith("image/") && !a.mimeType.startsWith("audio/") && a.type !== AttachmentTypeEnum.VOICE);
+	return { voice, images, files };
+}
+
+function getReplyPreview(msg: Message): string {
+	if (msg.isDeleted) return "Message deleted";
+	if (msg.content) return msg.content;
+	if (msg.type === MessageType.VOICE) return "🎤 Voice message";
+	return "Attachment";
+}
+
+function DeliveryStatusIcon({ status }: { status: number }) {
+	if (status === MessageStatus.READ) return <CheckCheck size={14} className="text-primary" />;
+	if (status === MessageStatus.DELIVERED) return <CheckCheck size={14} className="text-text-muted" />;
+	return <Check size={14} className="text-text-muted" />;
+}
+
 export const MessageBubble = memo(function MessageBubble({
 	message,
 	isOwn,
@@ -46,10 +66,9 @@ export const MessageBubble = memo(function MessageBubble({
 		);
 	}
 
-	const voiceAttachments = message.attachments.filter((a) => a.type === AttachmentTypeEnum.VOICE || a.mimeType.startsWith("audio/"));
-	const images = message.attachments.filter((a) => a.mimeType.startsWith("image/"));
-	const files = message.attachments.filter((a) => !a.mimeType.startsWith("image/") && !a.mimeType.startsWith("audio/") && a.type !== AttachmentTypeEnum.VOICE);
-	const isVoiceMessage = voiceAttachments.length > 0 && !message.content && images.length === 0 && files.length === 0;
+	const { voice: voiceAttachments, images, files } = categorizeAttachments(message.attachments);
+	const primaryVoice = voiceAttachments[0];
+	const isVoiceMessage = primaryVoice != null && !message.content && images.length === 0 && files.length === 0;
 
 	return (
 		<div
@@ -122,15 +141,10 @@ export const MessageBubble = memo(function MessageBubble({
 				)}
 
 				{replyToMessage && (
-					<div
-						className={cn("mb-1 rounded-lg border-l-2 border-primary/50 bg-black/5 px-3 py-1.5")}
-					>
-					<p className="truncate text-xs text-text-secondary italic">
-						{replyToMessage.isDeleted
-							? "Message deleted"
-							: replyToMessage.content
-								|| (replyToMessage.type === MessageType.VOICE ? "🎤 Voice message" : "Attachment")}
-					</p>
+					<div className={cn("mb-1 rounded-lg border-l-2 border-primary/50 bg-black/5 px-3 py-1.5")}>
+						<p className="truncate text-xs text-text-secondary italic">
+							{getReplyPreview(replyToMessage)}
+						</p>
 					</div>
 				)}
 
@@ -142,12 +156,12 @@ export const MessageBubble = memo(function MessageBubble({
 					)}
 				>
 					{isVoiceMessage ? (
-						<VoicePlayer
-							src={voiceAttachments[0]!.url}
-							duration={voiceAttachments[0]!.duration}
-							waveform={voiceAttachments[0]!.waveform}
-							isOwn={isOwn}
-						/>
+					<VoicePlayer
+						src={primaryVoice.url}
+						duration={primaryVoice.duration}
+						waveform={primaryVoice.waveform}
+						isOwn={isOwn}
+					/>
 					) : (
 						<>
 							{images.length > 0 && (
@@ -206,13 +220,7 @@ export const MessageBubble = memo(function MessageBubble({
 									transition={{ type: "spring", damping: 12 }}
 									className="inline-flex"
 								>
-									{deliveryStatus === MessageStatus.READ ? (
-										<CheckCheck size={14} className="text-primary" />
-									) : deliveryStatus === MessageStatus.DELIVERED ? (
-										<CheckCheck size={14} className="text-text-muted" />
-									) : (
-										<Check size={14} className="text-text-muted" />
-									)}
+									<DeliveryStatusIcon status={deliveryStatus} />
 								</motion.span>
 							</AnimatePresence>
 						)}

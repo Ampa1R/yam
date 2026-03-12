@@ -1,4 +1,4 @@
-import { and, db, eq, inArray, schema } from "@yam/db/pg";
+import { db, eq, inArray, schema } from "@yam/db/pg";
 import type { StreamJob } from "@yam/db/redis";
 import { unread } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";

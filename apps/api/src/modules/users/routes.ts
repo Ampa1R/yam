@@ -54,7 +54,7 @@ export const usersRoutes = new Elysia({ prefix: "/users" })
 			if (body.statusText !== undefined) updates.statusText = body.statusText;
 			if (body.isProfilePublic !== undefined) updates.isProfilePublic = body.isProfilePublic;
 
-			let user;
+			let user: typeof schema.users.$inferSelect | undefined;
 			try {
 				[user] = await db
 					.update(schema.users)

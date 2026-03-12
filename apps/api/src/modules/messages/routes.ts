@@ -3,7 +3,7 @@ import { and, db, eq, schema } from "@yam/db/pg";
 import { chatMembersCache, publishToUsers, queues, rateLimit } from "@yam/db/redis";
 import { scyllaQueries } from "@yam/db/scylla";
 import type { Attachment, ServerEvent } from "@yam/shared";
-import { AttachmentType, Limits, MessageType } from "@yam/shared";
+import { AttachmentType, type ChatType, Limits, MessageType } from "@yam/shared";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
 
@@ -131,7 +131,7 @@ export const messagesRoutes = new Elysia({ prefix: "/chats/:id/messages" })
 
 			const newMsgEvent: ServerEvent = {
 				event: "message:new",
-				data: message,
+				data: { ...message, chatType: (chat?.type ?? 0) as ChatType },
 				eventId: randomUUID(),
 			};
 			const otherMembers = memberIds.filter((id) => id !== userId);

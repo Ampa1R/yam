@@ -59,11 +59,13 @@ export function ChatSidebar({ className }: { className?: string }) {
 	const [confirmAction, setConfirmAction] = useState<{ chatId: string; chatType: number } | null>(null);
 
 	const executeDeleteOrLeave = useCallback(
-		(chatId: string, chatType: number) => {
-			const doAction = chatType === 1
-				? eden(api.api.chats({ id: chatId }).leave.delete())
-				: eden(api.api.chats({ id: chatId }).delete());
-			doAction.then(() => {
+		async (chatId: string, chatType: number) => {
+			try {
+				if (chatType === 1) {
+					await eden(api.api.chats({ id: chatId }).leave.delete());
+				} else {
+					await eden(api.api.chats({ id: chatId }).delete());
+				}
 				const state = useChatStore.getState();
 				state.clearChat(chatId);
 				state.setInbox(state.inbox.filter((i) => i.chatId !== chatId));
@@ -71,13 +73,13 @@ export function ChatSidebar({ className }: { className?: string }) {
 					state.setActiveChatId(null);
 				}
 				void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-		}).catch((err) => {
-			console.error("Delete/leave failed:", err);
-			toast({
-				title: chatType === 1 ? "Failed to leave group" : "Failed to delete chat",
-				variant: "error",
-			});
-		});
+			} catch (err) {
+				console.error("Delete/leave failed:", err);
+				toast({
+					title: chatType === 1 ? "Failed to leave group" : "Failed to delete chat",
+					variant: "error",
+				});
+			}
 		},
 		[],
 	);

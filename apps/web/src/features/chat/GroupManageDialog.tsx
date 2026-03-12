@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Crown, Shield, Trash2, UserMinus, UserPlus, X } from "lucide-react";
+import { Crown, Shield, UserMinus, UserPlus, X } from "lucide-react";
 import { useCallback, useState } from "react";
 import { toast } from "@/components/Toast";
 import { api, eden } from "@/lib/api";
@@ -85,7 +85,7 @@ export function GroupManageDialog({ chatId, chatName, members, myRole, myUserId,
 	const transferOwnership = useCallback(async (userId: string) => {
 		if (!confirm("Transfer ownership? You will become an admin.")) return;
 		try {
-			await eden(api.api.chats({ id: chatId }).transfer.post({ newOwnerId: userId }));
+			await eden(api.api.chats({ id: chatId }).transfer.post({ userId }));
 			toast({ title: "Ownership transferred", variant: "success" });
 			void queryClient.invalidateQueries({ queryKey: ["chat", chatId] });
 		} catch {
@@ -129,7 +129,6 @@ export function GroupManageDialog({ chatId, chatName, members, myRole, myUserId,
 									onChange={(e) => handleSearch(e.target.value)}
 									placeholder="Search by name or username..."
 									className="w-full rounded-lg border-none bg-surface px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary"
-									autoFocus
 								/>
 								{searchResults.length > 0 && (
 									<div className="mt-2 max-h-40 overflow-y-auto">

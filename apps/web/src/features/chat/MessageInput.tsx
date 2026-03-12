@@ -3,18 +3,11 @@ import { Edit2, File, Mic, Paperclip, Send, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { env } from "@/env";
+import { useAttachments } from "@/hooks/useAttachments";
+import { useVoiceRecording } from "@/hooks/useVoiceRecording";
 import { ALLOWED_FILE_TYPES } from "@/lib/file-types";
 import { api, eden } from "@/lib/api";
 import { cn } from "@/lib/cn";
-
-interface AttachmentItem {
-	file: File;
-	preview?: string;
-	uploading: boolean;
-	uploadedUrl?: string;
-	uploadedId?: string;
-	error?: string;
-}
 
 export interface SendAttachment {
 	type: number;
@@ -41,8 +34,6 @@ function mimeToAttachmentType(mime: string): number {
 	return AttachmentType.DOCUMENT;
 }
 
-const MAX_FILE_SIZE = env.maxFileSizeMb * 1024 * 1024;
-
 export function MessageInput({
 	onSend,
 	onTypingStart,
@@ -51,169 +42,17 @@ export function MessageInput({
 	onCancelEdit,
 }: Props) {
 	const [content, setContent] = useState("");
-	const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
-	const [fileErrors, setFileErrors] = useState<string[]>([]);
 	const typingTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const isTyping = useRef(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	const previewUrlsRef = useRef<Set<string>>(new Set());
 
 	const uploadFile = useCallback(async (file: File) => {
 		return eden(api.api.files.upload.post({ file }));
 	}, []);
 
-	const [isRecording, setIsRecording] = useState(false);
-	const [isSendingVoice, setIsSendingVoice] = useState(false);
-	const [recordingDuration, setRecordingDuration] = useState(0);
-	const [recordingError, setRecordingError] = useState<string | null>(null);
-	const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-	const audioChunksRef = useRef<Blob[]>([]);
-	const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-	const recordingStartRef = useRef<number>(0);
-	const recordingStopRef = useRef<number>(0);
-
-	const MAX_VOICE_DURATION = 300;
-	const WAVEFORM_SAMPLES = 50;
-
-	const generateWaveform = useCallback(async (blob: Blob): Promise<number[]> => {
-		let audioContext: AudioContext | null = null;
-		try {
-			audioContext = new AudioContext();
-			const arrayBuffer = await blob.arrayBuffer();
-			const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-			const channelData = audioBuffer.getChannelData(0);
-
-			const samplesPerBar = Math.max(1, Math.floor(channelData.length / WAVEFORM_SAMPLES));
-			const waveform: number[] = [];
-
-			for (let i = 0; i < WAVEFORM_SAMPLES; i++) {
-				const start = i * samplesPerBar;
-				const end = Math.min(start + samplesPerBar, channelData.length);
-				let sum = 0;
-				for (let j = start; j < end; j++) {
-					sum += Math.abs(channelData[j]!);
-				}
-				const rms = sum / (end - start);
-				waveform.push(rms);
-			}
-
-			const max = Math.max(...waveform, 0.001);
-			return waveform.map((v) => Math.round((v / max) * 100));
-		} catch {
-			return Array.from({ length: WAVEFORM_SAMPLES }, (_, i) => {
-				const x = Math.sin(i * 0.7) * 0.5 + Math.cos(i * 1.3) * 0.3 + 0.5;
-				return Math.round(15 + x * 60);
-			});
-		} finally {
-			if (audioContext) await audioContext.close().catch(() => {});
-		}
-	}, []);
-
-	const stopRecording = useCallback((discard = false) => {
-		recordingStopRef.current = Date.now();
-		if (discard && mediaRecorderRef.current) {
-			mediaRecorderRef.current.ondataavailable = null;
-			mediaRecorderRef.current.onstop = () => {
-				mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop());
-			};
-		}
-		if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-			mediaRecorderRef.current.stop();
-		}
-		if (recordingTimerRef.current) {
-			clearInterval(recordingTimerRef.current);
-			recordingTimerRef.current = null;
-		}
-		setIsRecording(false);
-		setRecordingDuration(0);
-	}, []);
-
-	const startRecording = useCallback(async () => {
-		try {
-			setRecordingError(null);
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-			const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-				? "audio/webm;codecs=opus"
-				: MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")
-					? "audio/ogg;codecs=opus"
-					: "audio/webm";
-
-			const recorder = new MediaRecorder(stream, { mimeType });
-			mediaRecorderRef.current = recorder;
-			audioChunksRef.current = [];
-
-			recorder.ondataavailable = (e) => {
-				if (e.data.size > 0) audioChunksRef.current.push(e.data);
-			};
-
-			recorder.onstop = async () => {
-				stream.getTracks().forEach((t) => t.stop());
-				const blob = new Blob(audioChunksRef.current, { type: mimeType });
-				if (blob.size < 1000) {
-					setIsSendingVoice(false);
-					return;
-				}
-
-				setIsSendingVoice(true);
-				const ext = mimeType.includes("ogg") ? "ogg" : "webm";
-				const file = new globalThis.File([blob], `voice-message.${ext}`, { type: mimeType.split(";")[0] });
-
-				try {
-					const [result, waveform] = await Promise.all([
-						uploadFile(file),
-						generateWaveform(blob),
-					]);
-					const uploaded = result as { url: string; id: string };
-					const stopTime = recordingStopRef.current || Date.now();
-					const durationSec = Math.max(1, Math.round((stopTime - recordingStartRef.current) / 1000));
-					onSend("", [
-						{
-							type: AttachmentType.VOICE,
-							url: uploaded.url,
-							filename: file.name,
-							size: file.size,
-							mimeType: file.type,
-							duration: durationSec,
-							waveform,
-						},
-					]);
-				} catch {
-					setRecordingError("Failed to upload voice message");
-					setTimeout(() => setRecordingError(null), 4000);
-				} finally {
-					setIsSendingVoice(false);
-				}
-			};
-
-			recorder.start(250);
-			recordingStartRef.current = Date.now();
-			setIsRecording(true);
-			setRecordingDuration(0);
-
-			recordingTimerRef.current = setInterval(() => {
-				const elapsed = Math.floor((Date.now() - recordingStartRef.current) / 1000);
-				setRecordingDuration(elapsed);
-				if (elapsed >= MAX_VOICE_DURATION) {
-					stopRecording();
-				}
-			}, 500);
-		} catch {
-			setRecordingError("Microphone access denied");
-			setTimeout(() => setRecordingError(null), 4000);
-		}
-	}, [onSend, stopRecording, generateWaveform, uploadFile]);
-
-	useEffect(() => {
-		return () => {
-			if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-				mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
-				mediaRecorderRef.current.stop();
-			}
-			if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-		};
-	}, []);
+	const voice = useVoiceRecording({ onSend, uploadFile });
+	const files = useAttachments(uploadFile);
 
 	useEffect(() => {
 		if (editingMessage) {
@@ -237,12 +76,9 @@ export function MessageInput({
 		return () => {
 			document.removeEventListener("visibilitychange", handleVisibilityChange);
 			if (typingTimeout.current) clearTimeout(typingTimeout.current);
-			for (const url of previewUrlsRef.current) {
-				URL.revokeObjectURL(url);
-			}
-			previewUrlsRef.current.clear();
+			files.revokeAllPreviews();
 		};
-	}, [onTypingStop]);
+	}, [onTypingStop, files.revokeAllPreviews]);
 
 	const handleSubmit = useCallback(
 		async (e?: React.FormEvent) => {
@@ -256,16 +92,16 @@ export function MessageInput({
 				return;
 			}
 
-			const hasAttachments = attachments.length > 0;
+			const hasAttachments = files.attachments.length > 0;
 			if (!trimmed && !hasAttachments) return;
 
-			const failedCount = attachments.filter((a) => a.error).length;
-			const uploadingCount = attachments.filter((a) => a.uploading).length;
+			const failedCount = files.attachments.filter((a) => a.error).length;
+			const uploadingCount = files.attachments.filter((a) => a.uploading).length;
 			if (uploadingCount > 0) return;
 			if (failedCount > 0 && !confirm(`${failedCount} attachment(s) failed to upload and will be skipped. Send anyway?`)) return;
 
 			const uploadedAttachments: SendAttachment[] = [];
-			for (const a of attachments) {
+			for (const a of files.attachments) {
 				if (a.uploadedUrl) {
 					uploadedAttachments.push({
 						type: mimeToAttachmentType(a.file.type),
@@ -279,7 +115,7 @@ export function MessageInput({
 
 			onSend(trimmed || "", uploadedAttachments.length > 0 ? uploadedAttachments : undefined);
 			setContent("");
-			setAttachments([]);
+			files.clearAttachments();
 			if (isTyping.current) {
 				isTyping.current = false;
 				onTypingStop();
@@ -288,7 +124,7 @@ export function MessageInput({
 				textareaRef.current.style.height = "auto";
 			}
 		},
-		[content, attachments, onSend, onTypingStop, editingMessage],
+		[content, files.attachments, files.clearAttachments, onSend, onTypingStop, editingMessage],
 	);
 
 	const handleKeyDown = useCallback(
@@ -330,137 +166,18 @@ export function MessageInput({
 		[onTypingStart, onTypingStop],
 	);
 
-	const validateFile = useCallback((file: File): string | null => {
-		if (file.size > MAX_FILE_SIZE) {
-			return `File "${file.name}" exceeds ${env.maxFileSizeMb}MB limit`;
-		}
-		if (!ALLOWED_FILE_TYPES.has(file.type) && file.type !== "") {
-			return `File type "${file.type}" is not allowed`;
-		}
-		return null;
-	}, []);
-
-	const handleFileSelect = useCallback(
-		async (files: FileList) => {
-			const validFiles: { file: File; preview?: string }[] = [];
-			const errors: string[] = [];
-
-			for (const file of Array.from(files)) {
-				const error = validateFile(file);
-				if (error) {
-					errors.push(error);
-					continue;
-				}
-				let preview: string | undefined;
-				if (file.type.startsWith("image/")) {
-					preview = URL.createObjectURL(file);
-					previewUrlsRef.current.add(preview);
-				}
-				validFiles.push({ file, preview });
-			}
-
-		if (errors.length > 0) {
-			setFileErrors(errors);
-			setTimeout(() => setFileErrors([]), 5000);
-		}
-
-			if (validFiles.length === 0) return;
-
-			const newAttachments: AttachmentItem[] = validFiles.map((v) => ({
-				file: v.file,
-				preview: v.preview,
-				uploading: true,
-			}));
-
-			setAttachments((prev) => [...prev, ...newAttachments]);
-
-			for (const attachment of newAttachments) {
-				try {
-					const result = await uploadFile(attachment.file);
-					setAttachments((prev) =>
-						prev.map((a) =>
-							a.file === attachment.file
-								? {
-										...a,
-										uploading: false,
-										uploadedUrl: (result as { url: string; id: string }).url,
-										uploadedId: (result as { url: string; id: string }).id,
-									}
-								: a,
-						),
-					);
-				} catch (err) {
-					setAttachments((prev) =>
-						prev.map((a) =>
-							a.file === attachment.file
-								? {
-										...a,
-										uploading: false,
-										error: err instanceof Error ? err.message : "Upload failed",
-									}
-								: a,
-						),
-					);
-				}
-			}
-		},
-		[validateFile, uploadFile],
-	);
-
-	const retryUpload = useCallback(
-		async (file: File) => {
-			setAttachments((prev) =>
-				prev.map((a) => (a.file === file ? { ...a, uploading: true, error: undefined } : a)),
-			);
-			try {
-				const result = (await uploadFile(file)) as { url: string; id: string };
-				setAttachments((prev) =>
-					prev.map((a) =>
-						a.file === file
-							? { ...a, uploading: false, uploadedUrl: result.url, uploadedId: result.id }
-							: a,
-					),
-				);
-			} catch (err) {
-				setAttachments((prev) =>
-					prev.map((a) =>
-						a.file === file
-							? {
-									...a,
-									uploading: false,
-									error: err instanceof Error ? err.message : "Upload failed",
-								}
-							: a,
-					),
-				);
-			}
-		},
-		[uploadFile],
-	);
-
-	const removeAttachment = useCallback((file: File) => {
-		setAttachments((prev) => {
-			const removed = prev.find((a) => a.file === file);
-			if (removed?.preview) {
-				URL.revokeObjectURL(removed.preview);
-				previewUrlsRef.current.delete(removed.preview);
-			}
-			return prev.filter((a) => a.file !== file);
-		});
-	}, []);
-
 	const formatDuration = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
 	return (
 		<div className="border-t border-border bg-surface">
-			{recordingError && (
+			{voice.recordingError && (
 				<div className="mx-4 mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">
-					{recordingError}
+					{voice.recordingError}
 				</div>
 			)}
-			{fileErrors.length > 0 && (
+			{files.fileErrors.length > 0 && (
 				<div className="mx-4 mt-2 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">
-					{fileErrors.map((err, i) => (
+					{files.fileErrors.map((err, i) => (
 						<div key={i}>{err}</div>
 					))}
 				</div>
@@ -486,9 +203,9 @@ export function MessageInput({
 				</div>
 			)}
 
-			{attachments.length > 0 && (
+			{files.attachments.length > 0 && (
 				<div className="flex gap-2 overflow-x-auto px-4 pt-3">
-					{attachments.map((a, i) => (
+					{files.attachments.map((a, i) => (
 						<div
 							key={`${a.file.name}-${a.file.size}-${i}`}
 							className={cn(
@@ -518,7 +235,7 @@ export function MessageInput({
 							{a.error && (
 								<button
 									type="button"
-									onClick={() => retryUpload(a.file)}
+									onClick={() => files.retryUpload(a.file)}
 									className="absolute inset-0 flex flex-col items-center justify-center rounded-lg bg-danger/20"
 									title="Click to retry"
 								>
@@ -528,7 +245,7 @@ export function MessageInput({
 							)}
 							<button
 								type="button"
-								onClick={() => removeAttachment(a.file)}
+								onClick={() => files.removeAttachment(a.file)}
 								className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-danger text-white shadow-sm"
 								aria-label={`Remove ${a.file.name}`}
 							>
@@ -550,7 +267,7 @@ export function MessageInput({
 								accept={Array.from(ALLOWED_FILE_TYPES).join(",")}
 								className="hidden"
 								onChange={(e) => {
-									if (e.target.files) handleFileSelect(e.target.files);
+									if (e.target.files) files.handleFileSelect(e.target.files);
 									e.target.value = "";
 								}}
 							/>
@@ -566,16 +283,16 @@ export function MessageInput({
 					)}
 
 				<div className="flex-1">
-					{isSendingVoice ? (
+					{voice.isSendingVoice ? (
 						<div className="flex items-center gap-3 rounded-2xl border border-border bg-surface-secondary px-4 py-2.5">
 							<div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
 							<span className="text-sm text-text-muted">Sending voice message...</span>
 						</div>
-					) : isRecording ? (
+					) : voice.isRecording ? (
 						<div className="flex items-center gap-3 rounded-2xl border border-danger/30 bg-surface-secondary px-4 py-2.5">
 							<button
 								type="button"
-								onClick={() => stopRecording(true)}
+								onClick={() => voice.stopRecording(true)}
 								className="shrink-0 rounded-full p-0.5 text-text-muted hover:bg-surface-hover hover:text-danger"
 								aria-label="Cancel recording"
 								title="Cancel"
@@ -584,7 +301,7 @@ export function MessageInput({
 							</button>
 							<span className="h-2.5 w-2.5 animate-pulse rounded-full bg-danger" />
 							<span className="text-sm font-medium text-text-primary">
-								{formatDuration(recordingDuration)}
+								{formatDuration(voice.recordingDuration)}
 							</span>
 						</div>
 					) : (
@@ -606,11 +323,11 @@ export function MessageInput({
 				</div>
 
 				<AnimatePresence mode="wait">
-					{isRecording ? (
+					{voice.isRecording ? (
 						<motion.button
 							key="record-stop"
 							type="button"
-							onClick={() => stopRecording()}
+							onClick={() => voice.stopRecording()}
 							initial={{ scale: 0.8, opacity: 0 }}
 							animate={{ scale: 1, opacity: 1 }}
 							exit={{ scale: 0.8, opacity: 0 }}
@@ -620,13 +337,13 @@ export function MessageInput({
 						>
 							<Send size={18} />
 						</motion.button>
-					) : content.trim() || attachments.length > 0 || editingMessage ? (
+					) : content.trim() || files.attachments.length > 0 || editingMessage ? (
 						<motion.button
 							key="send"
 							type="submit"
 							disabled={
-								(!editingMessage && attachments.some((a) => a.uploading)) ||
-								(!content.trim() && attachments.length === 0)
+								(!editingMessage && files.attachments.some((a) => a.uploading)) ||
+								(!content.trim() && files.attachments.length === 0)
 							}
 							initial={{ scale: 0.8, opacity: 0 }}
 							animate={{ scale: 1, opacity: 1 }}
@@ -644,7 +361,7 @@ export function MessageInput({
 						<motion.button
 							key="mic"
 							type="button"
-							onClick={startRecording}
+							onClick={voice.startRecording}
 							initial={{ scale: 0.8, opacity: 0 }}
 							animate={{ scale: 1, opacity: 1 }}
 							exit={{ scale: 0.8, opacity: 0 }}

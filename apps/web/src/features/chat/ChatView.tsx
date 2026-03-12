@@ -2,10 +2,8 @@ import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-quer
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Attachment, AttachmentType, ClientEvent, Message } from "@yam/shared";
 import { AttachmentType as AttachmentTypeEnum, MessageType } from "@yam/shared";
-import { formatDistanceToNow } from "date-fns";
 import {
 	ArrowDown,
-	ArrowLeft,
 	Loader2,
 	Reply,
 	X,
@@ -13,80 +11,67 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/shallow";
-import { TypingDots } from "@/components/TypingDots";
 import { useThrottleCallback } from "@/hooks/useThrottle";
 import { api, eden } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
+import { ChatHeader } from "./ChatHeader";
 import { GroupManageDialog } from "./GroupManageDialog";
 import { MessageBubble } from "./MessageBubble";
 import { MessageInput } from "./MessageInput";
+import { type ChatDetail, type MessagesPage, estimateMessageSize } from "./chat-view-types";
 
 const EMPTY_MESSAGES: Message[] = [];
 
-interface ChatDetailMember {
-	userId: string;
-	role: number;
-	isPinned: boolean;
-	isMuted: boolean;
-	joinedAt?: string;
-	user: {
-		id: string;
-		displayName: string;
-		username: string | null;
-		avatarUrl: string | null;
-	};
+function resolveMessageType(attachments?: { type: number }[]): MessageType {
+	if (!attachments || attachments.length === 0) return MessageType.TEXT;
+	if (attachments.some((a) => a.type === AttachmentTypeEnum.VOICE)) return MessageType.VOICE;
+	return MessageType.MEDIA;
 }
 
-interface ChatDetail {
-	chat: {
-		id: string;
-		type: number;
-		name: string | null;
-		description: string | null;
-		avatarUrl: string | null;
-		createdBy: string;
-		memberCount: number;
-	};
-	members: ChatDetailMember[];
-	myMembership: unknown;
-}
+function mergeWithLocalMessages(apiMessages: Message[], chatId: string): Message[] {
+	const existing = useChatStore.getState().messages.get(chatId) ?? [];
+	const apiIds = new Set(apiMessages.map((m) => m.id));
+	const pendingMessages = useChatStore.getState().pendingMessages;
 
-interface MessagesPage {
-	messages: Message[];
-	nextCursor: string | null;
+	const confirmedClientIds: string[] = [];
+	for (const [clientId, pending] of pendingMessages) {
+		if (pending.chatId !== chatId) continue;
+		const matched = apiMessages.some(
+			(m) =>
+				m.senderId === pending.message.senderId &&
+				m.content === pending.message.content &&
+				Math.abs(new Date(m.createdAt).getTime() - new Date(pending.message.createdAt).getTime()) < 30_000,
+		);
+		if (matched) confirmedClientIds.push(clientId);
+	}
+
+	let base = existing;
+	if (confirmedClientIds.length > 0) {
+		const pendingIds = new Set(
+			confirmedClientIds.map((cid) => pendingMessages.get(cid)?.message.id).filter(Boolean),
+		);
+		base = existing.filter((m) => !pendingIds.has(m.id));
+		for (const cid of confirmedClientIds) {
+			useChatStore.setState((s) => {
+				const np = new Map(s.pendingMessages);
+				np.delete(cid);
+				return { pendingMessages: np };
+			});
+		}
+	}
+
+	const localOnly = base.filter((m) => !apiIds.has(m.id));
+	if (localOnly.length === 0) return apiMessages;
+
+	return [...apiMessages, ...localOnly].sort(
+		(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+	);
 }
 
 interface Props {
 	chatId: string;
 	ws: { send: (event: ClientEvent) => void };
-}
-
-function estimateMessageSize(message: Message): number {
-	if (message.isDeleted) return 44;
-
-	let height = 56;
-
-	if (message.replyTo) height += 30;
-	if (message.attachments.length > 0) {
-		const imageCount = message.attachments.filter((a) => a.mimeType.startsWith("image/")).length;
-		const fileCount = message.attachments.length - imageCount;
-		if (imageCount > 0) {
-			height += imageCount > 1 ? 200 : 160;
-		}
-		if (fileCount > 0) {
-			height += fileCount * 42;
-		}
-	}
-
-	if (message.content) {
-		const charsPerLine = 34;
-		const lineHeight = 20;
-		height += Math.max(1, Math.ceil(message.content.length / charsPerLine)) * lineHeight;
-	}
-
-	return Math.min(520, Math.max(52, height));
 }
 
 export function ChatView({ chatId, ws }: Props) {
@@ -170,60 +155,13 @@ export function ChatView({ chatId, ws }: Props) {
 	const isPaginatingRef = useRef(false);
 
 	useEffect(() => {
-		if (messagesData?.pages) {
-			const pageCount = messagesData.pages.length;
-			isPaginatingRef.current = pageCount > prevPageCountRef.current && prevPageCountRef.current > 0;
-			prevPageCountRef.current = pageCount;
+		if (!messagesData?.pages) return;
+		const pageCount = messagesData.pages.length;
+		isPaginatingRef.current = pageCount > prevPageCountRef.current && prevPageCountRef.current > 0;
+		prevPageCountRef.current = pageCount;
 
-			const apiMessages = messagesData.pages.flatMap((p) => (p as MessagesPage).messages).reverse();
-			const existing = useChatStore.getState().messages.get(chatId) ?? [];
-			const apiIds = new Set(apiMessages.map((m) => m.id));
-
-			const pendingMessages = useChatStore.getState().pendingMessages;
-			const confirmedClientIds: string[] = [];
-			for (const [clientId, pending] of pendingMessages) {
-				if (pending.chatId !== chatId) continue;
-				const matchedByApi = apiMessages.some(
-					(api) =>
-						api.senderId === pending.message.senderId &&
-						api.content === pending.message.content &&
-						Math.abs(new Date(api.createdAt).getTime() - new Date(pending.message.createdAt).getTime()) < 30_000,
-				);
-				if (matchedByApi) {
-					confirmedClientIds.push(clientId);
-				}
-			}
-			if (confirmedClientIds.length > 0) {
-				const pendingIds = new Set(
-					confirmedClientIds
-						.map((cid) => pendingMessages.get(cid)?.message.id)
-						.filter(Boolean),
-				);
-				const cleanedExisting = existing.filter((m) => !pendingIds.has(m.id));
-				const localOnly = cleanedExisting.filter((m) => !apiIds.has(m.id));
-				const merged = localOnly.length > 0
-					? [...apiMessages, ...localOnly].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-					: apiMessages;
-				setMessages(chatId, merged);
-				for (const cid of confirmedClientIds) {
-					useChatStore.setState((s) => {
-						const np = new Map(s.pendingMessages);
-						np.delete(cid);
-						return { pendingMessages: np };
-					});
-				}
-			} else {
-				const localOnly = existing.filter((m) => !apiIds.has(m.id));
-				if (localOnly.length > 0) {
-					const merged = [...apiMessages, ...localOnly].sort(
-						(a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-					);
-					setMessages(chatId, merged);
-				} else {
-					setMessages(chatId, apiMessages);
-				}
-			}
-		}
+		const apiMessages = messagesData.pages.flatMap((p) => (p as MessagesPage).messages).reverse();
+		setMessages(chatId, mergeWithLocalMessages(apiMessages, chatId));
 	}, [messagesData, chatId, setMessages]);
 
 	useEffect(() => {
@@ -336,12 +274,7 @@ export function ChatView({ chatId, ws }: Props) {
 			if (!user) return;
 			const clientId = crypto.randomUUID();
 
-			const isVoice = attachments?.some((a) => a.type === AttachmentTypeEnum.VOICE);
-			const msgType = isVoice
-				? MessageType.VOICE
-				: attachments && attachments.length > 0
-					? MessageType.MEDIA
-					: MessageType.TEXT;
+			const msgType = resolveMessageType(attachments);
 
 			const optimisticMessage: Message = {
 				id: `pending-${clientId}`,
@@ -485,7 +418,7 @@ export function ChatView({ chatId, ws }: Props) {
 		for (const m of chatDetail.members) {
 			if ("isOnline" in m) {
 				setPresence(m.userId, {
-					isOnline: (m as ChatDetailMember & { isOnline: boolean }).isOnline,
+					isOnline: (m as { isOnline: boolean }).isOnline,
 					lastSeen: null,
 					updatedAt: 0,
 				});
@@ -505,38 +438,16 @@ export function ChatView({ chatId, ws }: Props) {
 
 	return (
 		<div className="flex h-full flex-col bg-chat-bg">
-			<header className="flex items-center gap-3 border-b border-border bg-surface px-4 py-3">
-				<button
-					type="button"
-					onClick={() => setActiveChatId(null)}
-					className="rounded-lg p-1 text-text-secondary hover:bg-surface-hover lg:hidden"
-					aria-label="Back to chats"
-				>
-					<ArrowLeft size={20} />
-				</button>
-				<div className="relative">
-					<div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/20 font-semibold text-primary">
-						{displayName.charAt(0).toUpperCase()}
-					</div>
-					{chatDetail?.chat?.type === 0 && isOtherOnline && (
-						<div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-surface bg-success" />
-					)}
-				</div>
-				<div>
-					<h2 className="font-semibold text-text-primary">{displayName}</h2>
-					<p className="text-xs text-text-secondary">
-						{typingUserIds.length > 0
-							? <TypingDots />
-							: chatDetail?.chat?.type === 0
-								? isOtherOnline
-									? "online"
-									: otherPresence?.lastSeen
-										? `last seen ${formatDistanceToNow(new Date(otherPresence.lastSeen), { addSuffix: true })}`
-										: "offline"
-								: <button type="button" onClick={() => setShowGroupManage(true)} className="hover:underline">{memberCount} members</button>}
-					</p>
-				</div>
-			</header>
+			<ChatHeader
+				chatDetail={chatDetail}
+				displayName={displayName}
+				isOtherOnline={isOtherOnline}
+				otherPresence={otherPresence}
+				typingUserIds={typingUserIds}
+				memberCount={memberCount}
+				onBack={() => setActiveChatId(null)}
+				onShowGroupManage={() => setShowGroupManage(true)}
+			/>
 
 			<div
 				ref={scrollRef}

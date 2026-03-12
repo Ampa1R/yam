@@ -7,7 +7,6 @@ import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { useIsMobile } from "@/hooks/useMediaQuery";
 import { useConnectionStatus, useWebSocket } from "@/hooks/useWebSocket";
 import { api, eden } from "@/lib/api";
-import { cn } from "@/lib/cn";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
 import { ChatSidebar } from "./ChatSidebar";
@@ -51,11 +50,11 @@ export function ChatLayout() {
 	}, [userData, setUser]);
 
 	useEffect(() => {
-		if (inboxData?.chats) setInbox(inboxData.chats);
-		if (inboxData?.presence) {
-			const presenceMap = inboxData.presence as Record<string, { isOnline: boolean; lastSeen: string | null }>;
+		const data = inboxData as { chats?: unknown[]; presence?: Record<string, { isOnline: boolean; lastSeen: string | null }> } | undefined;
+		if (data?.chats) setInbox(data.chats as any);
+		if (data?.presence) {
 			const setPresence = useChatStore.getState().setPresence;
-			for (const [uid, p] of Object.entries(presenceMap)) {
+			for (const [uid, p] of Object.entries(data.presence)) {
 				setPresence(uid, { isOnline: p.isOnline, lastSeen: p.lastSeen, updatedAt: 0 });
 			}
 		}

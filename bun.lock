@@ -5,38 +5,39 @@
     "": {
       "name": "yam",
       "devDependencies": {
-        "@biomejs/biome": "latest",
-        "turbo": "latest",
-        "typescript": "latest",
+        "@biomejs/biome": "^2.4.6",
+        "@types/bun": "^1.3.10",
+        "turbo": "^2.8.13",
+        "typescript": "^5.9.3",
       },
     },
     "apps/admin": {
       "name": "@yam/admin",
       "version": "0.0.1",
       "dependencies": {
-        "@elysiajs/cors": "latest",
+        "@elysiajs/cors": "^1.4.1",
         "@yam/db": "workspace:*",
         "@yam/shared": "workspace:*",
-        "elysia": "latest",
+        "elysia": "^1.4.27",
       },
       "devDependencies": {
-        "bun-types": "latest",
-        "typescript": "latest",
+        "bun-types": "^1.3.10",
+        "typescript": "^5.9.3",
       },
     },
     "apps/api": {
       "name": "@yam/api",
       "version": "0.0.1",
       "dependencies": {
-        "@elysiajs/bearer": "latest",
-        "@elysiajs/cors": "latest",
+        "@elysiajs/bearer": "^1.4.3",
+        "@elysiajs/cors": "^1.4.1",
         "@yam/db": "workspace:*",
         "@yam/shared": "workspace:*",
-        "elysia": "latest",
+        "elysia": "^1.4.27",
       },
       "devDependencies": {
-        "bun-types": "latest",
-        "typescript": "latest",
+        "bun-types": "^1.3.10",
+        "typescript": "^5.9.3",
       },
     },
     "apps/gateway": {
@@ -45,11 +46,11 @@
       "dependencies": {
         "@yam/db": "workspace:*",
         "@yam/shared": "workspace:*",
-        "elysia": "latest",
+        "elysia": "^1.4.27",
       },
       "devDependencies": {
-        "bun-types": "latest",
-        "typescript": "latest",
+        "bun-types": "^1.3.10",
+        "typescript": "^5.9.3",
       },
     },
     "apps/web": {
@@ -94,8 +95,8 @@
         "@yam/shared": "workspace:*",
       },
       "devDependencies": {
-        "bun-types": "latest",
-        "typescript": "latest",
+        "bun-types": "^1.3.10",
+        "typescript": "^5.9.3",
       },
     },
     "packages/db": {
@@ -103,26 +104,26 @@
       "version": "0.0.1",
       "dependencies": {
         "@yam/shared": "workspace:*",
-        "cassandra-driver": "latest",
-        "drizzle-orm": "latest",
-        "ioredis": "latest",
-        "postgres": "latest",
+        "cassandra-driver": "^4.8.0",
+        "drizzle-orm": "^0.45.1",
+        "ioredis": "^5.10.0",
+        "postgres": "^3.4.8",
       },
       "devDependencies": {
-        "bun-types": "latest",
-        "drizzle-kit": "latest",
-        "typescript": "latest",
+        "bun-types": "^1.3.10",
+        "drizzle-kit": "^0.31.9",
+        "typescript": "^5.9.3",
       },
     },
     "packages/shared": {
       "name": "@yam/shared",
       "version": "0.0.1",
       "dependencies": {
-        "@sinclair/typebox": "latest",
+        "@sinclair/typebox": "^0.34.48",
       },
       "devDependencies": {
-        "bun-types": "latest",
-        "typescript": "latest",
+        "bun-types": "^1.3.10",
+        "typescript": "^5.9.3",
       },
     },
   },
@@ -432,6 +433,8 @@
     "@types/babel__template": ["@types/babel__template@7.4.4", "", { "dependencies": { "@babel/parser": "^7.1.0", "@babel/types": "^7.0.0" } }, "sha512-h/NUaSyG5EyxBIp8YRxo4RMe2/qQgvyowRwVMzhYhBCONbW8PUsg4lkFMrhgZhUe5z3L3MiLDuvyJ/CaPa2A8A=="],
 
     "@types/babel__traverse": ["@types/babel__traverse@7.28.0", "", { "dependencies": { "@babel/types": "^7.28.2" } }, "sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q=="],
+
+    "@types/bun": ["@types/bun@1.3.10", "", { "dependencies": { "bun-types": "1.3.10" } }, "sha512-0+rlrUrOrTSskibryHbvQkDOWRJwJZqZlxrUs1u4oOoTln8+WIXBPmAuCF35SWB2z4Zl3E84Nl/D0P7803nigQ=="],
 
     "@types/estree": ["@types/estree@1.0.8", "", {}, "sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w=="],
 

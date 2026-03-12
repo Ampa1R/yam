@@ -29,7 +29,9 @@
 			},
 			"a11y": {
 				"noLabelWithoutControl": "warn",
-				"useButtonType": "warn"
+				"useButtonType": "warn",
+				"noStaticElementInteractions": "warn",
+				"useSemanticElements": "warn"
 			}
 		}
 	},

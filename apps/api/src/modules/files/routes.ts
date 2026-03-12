@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { db, eq, schema, sql } from "@yam/db/pg";
+import { db, eq, schema, } from "@yam/db/pg";
 import { queues, rateLimit } from "@yam/db/redis";
 import { Elysia, t } from "elysia";
 import { authMiddleware } from "../../lib/auth-middleware";
@@ -180,7 +180,7 @@ export const filesRoutes = new Elysia({ prefix: "/files" })
 				return { error: "File not found on disk" };
 			}
 
-			const safeName = file.filename.replace(/[^\w.\-]/g, "_");
+			const safeName = file.filename.replace(/[^\w.-]/g, "_");
 			set.headers["content-type"] = file.mimeType;
 			set.headers["content-disposition"] = `inline; filename="${safeName}"`;
 			set.headers["cache-control"] = "private, max-age=86400, immutable";
