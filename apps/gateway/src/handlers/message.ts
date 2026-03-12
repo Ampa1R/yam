@@ -9,7 +9,7 @@ import type {
 	SendMessagePayload,
 	ServerEvent,
 } from "@yam/shared";
-import { Limits, MessageStatus, MessageType } from "@yam/shared";
+import { ChatType, Limits, MessageStatus, MessageType } from "@yam/shared";
 import { connectionManager } from "../connection/manager";
 import { getChatMemberIds } from "../lib/chat-members";
 
@@ -187,7 +187,7 @@ export async function handleSendMessage(userId: string, data: unknown): Promise<
 		}
 	}
 
-	const newMsgEvent: ServerEvent = { event: "message:new", data: message, eventId: randomUUID() };
+	const newMsgEvent: ServerEvent = { event: "message:new", data: { ...message, chatType: chat!.type as ChatType }, eventId: randomUUID() };
 
 	connectionManager.sendToUsers(localRecipients, newMsgEvent);
 

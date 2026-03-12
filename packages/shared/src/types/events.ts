@@ -1,3 +1,4 @@
+import type { ChatType } from "../constants";
 import type { Message } from "./message";
 
 export type ClientEvent =
@@ -13,7 +14,7 @@ export type ClientEvent =
 export type ServerEvent = {
 	eventId?: string;
 } & (
-	| { event: "message:new"; data: Message }
+	| { event: "message:new"; data: MessageNewPayload }
 	| { event: "message:updated"; data: MessageUpdatedPayload }
 	| { event: "message:deleted"; data: MessageDeletedPayload }
 	| { event: "message:status"; data: MessageStatusPayload }
@@ -25,6 +26,10 @@ export type ServerEvent = {
 	| { event: "pong" }
 	| { event: "error"; data: ErrorPayload }
 );
+
+export interface MessageNewPayload extends Message {
+	chatType: ChatType;
+}
 
 export interface AuthPayload {
 	token: string;

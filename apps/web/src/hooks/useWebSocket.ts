@@ -1,30 +1,14 @@
 import type { ClientEvent, ServerEvent } from "@yam/shared";
-import { Limits, MessageType } from "@yam/shared";
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { Limits } from "@yam/shared";
+import { useCallback, useEffect, useRef } from "react";
 import { env } from "@/env";
 import { queryClient } from "@/lib/queryClient";
 import { useAuthStore } from "@/stores/auth";
 import { useChatStore } from "@/stores/chat";
+import { setGlobalStatus } from "./ws/connection-status";
+import { handleServerEvent } from "./ws/event-handlers";
 
-type ConnectionStatus = "connected" | "connecting" | "disconnected";
-
-let globalStatus: ConnectionStatus = "disconnected";
-const statusListeners = new Set<() => void>();
-
-function setGlobalStatus(status: ConnectionStatus) {
-	globalStatus = status;
-	for (const listener of statusListeners) listener();
-}
-
-export function useConnectionStatus(): ConnectionStatus {
-	return useSyncExternalStore(
-		(cb) => {
-			statusListeners.add(cb);
-			return () => statusListeners.delete(cb);
-		},
-		() => globalStatus,
-	);
-}               
+export { useConnectionStatus } from "./ws/connection-status";
 
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const BASE_RECONNECT_DELAY_MS = 1_000;
@@ -41,6 +25,7 @@ export function useWebSocket() {
 	const eventOrderRef = useRef<string[]>([]);
 	const { isAuthenticated } = useAuthStore();
 	const storeRef = useRef(useChatStore.getState());
+	const authRetryRef = useRef(0);
 
 	useEffect(() => {
 		return useChatStore.subscribe((state) => {
@@ -49,141 +34,7 @@ export function useWebSocket() {
 	}, []);
 
 	const handleEvent = useCallback((event: ServerEvent) => {
-		const store = storeRef.current;
-		switch (event.event) {
-		case "message:new": {
-			store.addMessage(event.data.chatId, event.data);
-			const preview =
-				event.data.content.slice(0, 100) ||
-				(event.data.type === MessageType.VOICE ? "🎤 Voice message"
-					: event.data.attachments.length > 0 ? "📎 Attachment" : "");
-			const isActiveChat = useChatStore.getState().activeChatId === event.data.chatId;
-			const currentItem = store.inbox.find((i) => i.chatId === event.data.chatId);
-			if (currentItem) {
-				const inboxUpdate: Record<string, unknown> = {
-					lastMsgPreview: preview,
-					lastMsgSender: event.data.senderId,
-					lastMsgType: event.data.type,
-					lastActivity: event.data.createdAt,
-				};
-				if (!isActiveChat) {
-					inboxUpdate.unreadCount = (currentItem.unreadCount ?? 0) + 1;
-				}
-				store.updateInboxItem(event.data.chatId, inboxUpdate);
-			} else {
-				store.addInboxItem({
-					chatId: event.data.chatId,
-					chatType: 0,
-					chatName: null,
-					chatAvatar: null,
-					otherUserId: event.data.senderId,
-					lastMsgSender: event.data.senderId,
-					lastMsgType: event.data.type,
-					lastMsgPreview: preview,
-					lastActivity: event.data.createdAt,
-					unreadCount: isActiveChat ? 0 : 1,
-					isPinned: false,
-					isMuted: false,
-				});
-				void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-			}
-			break;
-		}
-		case "message:ack": {
-			const pending = useChatStore.getState().pendingMessages.get(event.data.clientId);
-			store.confirmMessage(event.data.clientId, event.data.messageId, event.data.createdAt);
-			if (pending) {
-				const ackPreview =
-					pending.message.content.slice(0, 100) ||
-					(pending.message.type === MessageType.VOICE ? "🎤 Voice message"
-						: pending.message.attachments.length > 0 ? "📎 Attachment" : "");
-				const ackUpdate = {
-					lastMsgPreview: ackPreview,
-					lastMsgSender: pending.message.senderId,
-					lastMsgType: pending.message.type,
-					lastActivity: event.data.createdAt,
-				};
-				store.updateInboxItem(pending.chatId, ackUpdate);
-				if (!useChatStore.getState().inbox.some((i) => i.chatId === pending.chatId)) {
-					void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-				}
-			}
-			break;
-		}
-			case "message:updated":
-				store.updateMessage(event.data.chatId, event.data.messageId, {
-					content: event.data.content,
-					isEdited: true,
-					editedAt: event.data.editedAt,
-				});
-				break;
-			case "message:deleted":
-				store.removeMessage(event.data.chatId, event.data.messageId);
-				break;
-			case "message:status":
-				store.setMessageStatus(event.data.messageId, event.data.status);
-				break;
-			case "typing":
-				store.setTyping(event.data.chatId, event.data.userId, event.data.isTyping);
-				break;
-			case "presence":
-				store.setPresence(event.data.userId, {
-					isOnline: event.data.status === "online",
-					lastSeen: event.data.lastSeen,
-					updatedAt: Date.now(),
-				});
-				break;
-			case "chat:updated": {
-				const preserveUnread = event.data.unreadCount === -1;
-				const existingItem = store.inbox.find((i) => i.chatId === event.data.chatId);
-				if (existingItem) {
-					const localTime = new Date(existingItem.lastActivity).getTime();
-					const eventTime = event.data.lastMessage
-						? new Date(event.data.lastMessage.createdAt).getTime()
-						: 0;
-					const shouldUpdatePreview = preserveUnread || eventTime > localTime;
-					if (shouldUpdatePreview) {
-						const unreadUpdate = preserveUnread
-							? {}
-							: useChatStore.getState().activeChatId === event.data.chatId
-								? { unreadCount: 0 }
-								: existingItem.unreadCount === 0 && event.data.unreadCount > 0
-									? {}
-									: { unreadCount: event.data.unreadCount };
-						store.updateInboxItem(event.data.chatId, {
-							...unreadUpdate,
-							...(event.data.lastMessage && {
-								lastMsgPreview: event.data.lastMessage.preview,
-								lastMsgSender: event.data.lastMessage.senderId,
-								lastMsgType: event.data.lastMessage.type,
-								lastActivity: event.data.lastMessage.createdAt,
-							}),
-							...(!event.data.lastMessage && preserveUnread && { lastMsgPreview: "Message deleted" }),
-						});
-					}
-				} else if (!preserveUnread) {
-					void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-				}
-				break;
-			}
-			case "pong":
-				break;
-			case "error": {
-				const errData = event.data;
-				if (errData.severity === "info") break;
-				store.setWsError({
-					code: errData.code,
-					message: errData.message,
-					severity: errData.severity,
-					retryable: errData.retryable,
-					scope: errData.scope,
-				});
-				if (errData.severity === "error") {
-					console.error("[WS] Server error:", errData);
-				}
-				break;
-			}
-		}
+		handleServerEvent(event, storeRef.current);
 	}, []);
 
 	const flushOfflineBuffer = useCallback((ws: WebSocket) => {
@@ -193,8 +44,6 @@ export function useWebSocket() {
 			if (event) ws.send(JSON.stringify(event));
 		}
 	}, []);
-
-	const authRetryRef = useRef(0);
 
 	const connect = useCallback(() => {
 		const token = localStorage.getItem("accessToken");
@@ -222,10 +71,9 @@ export function useWebSocket() {
 		ws.onmessage = (e) => {
 			try {
 				const event = JSON.parse(e.data) as ServerEvent;
+
 				if (event.eventId) {
-					if (eventDedupRef.current.has(event.eventId)) {
-						return;
-					}
+					if (eventDedupRef.current.has(event.eventId)) return;
 					eventDedupRef.current.add(event.eventId);
 					eventOrderRef.current.push(event.eventId);
 					if (eventOrderRef.current.length > MAX_EVENT_DEDUP) {
@@ -233,20 +81,22 @@ export function useWebSocket() {
 						if (stale) eventDedupRef.current.delete(stale);
 					}
 				}
+
 				if (event.event === "auth:ok") {
-					console.log("[WS] Authenticated");
 					const wasReconnect = reconnectAttempts.current > 0;
 					setGlobalStatus("connected");
 					storeRef.current.setWsError(null);
 					reconnectAttempts.current = 0;
 					authRetryRef.current = 0;
 					flushOfflineBuffer(ws);
+
 					if (heartbeatRef.current) clearInterval(heartbeatRef.current);
 					heartbeatRef.current = setInterval(() => {
 						if (ws.readyState === WebSocket.OPEN) {
 							ws.send(JSON.stringify({ event: "ping" }));
 						}
 					}, Limits.HEARTBEAT_INTERVAL_MS);
+
 					if (wasReconnect) {
 						void queryClient.invalidateQueries({ queryKey: ["inbox"] });
 						const activeChatId = useChatStore.getState().activeChatId;
@@ -256,19 +106,19 @@ export function useWebSocket() {
 					}
 					return;
 				}
+
 				if (event.event === "error" && event.data.code === "ACCOUNT_SUSPENDED") {
-					console.error("[WS] Account suspended");
 					useAuthStore.getState().logout();
 					window.location.href = "/login?reason=suspended";
 					return;
 				}
+
 				if (
 					event.event === "error" &&
 					(event.data.code === "AUTH_FAILED" || event.data.code === "AUTH_TIMEOUT")
 				) {
 					if (authRetryRef.current < 2) {
 						authRetryRef.current += 1;
-						console.log("[WS] Auth failed, attempting token refresh...");
 						ws.onclose = null;
 						ws.close();
 						const refreshToken = localStorage.getItem("refreshToken");
@@ -288,24 +138,23 @@ export function useWebSocket() {
 									connect();
 								})
 								.catch(() => {
-									console.error("[WS] Token refresh failed, logging out");
 									useAuthStore.getState().logout();
 									window.location.href = "/login";
 								});
 							return;
 						}
 					}
-					console.error("[WS] Auth terminal error:", event.data);
 					useAuthStore.getState().logout();
 					window.location.href = "/login";
 					return;
 				}
+
 				if (event.event === "error" && event.data.code === "AUTH_REQUIRED") {
-					console.error("[WS] Auth required:", event.data);
 					useAuthStore.getState().logout();
 					window.location.href = "/login";
 					return;
 				}
+
 				handleEvent(event);
 			} catch (err) {
 				console.error("[WS] Parse error:", err);
@@ -313,7 +162,6 @@ export function useWebSocket() {
 		};
 
 		ws.onclose = () => {
-			console.log("[WS] Disconnected");
 			setGlobalStatus("disconnected");
 			if (heartbeatRef.current) clearInterval(heartbeatRef.current);
 
@@ -353,9 +201,7 @@ export function useWebSocket() {
 	}, []);
 
 	useEffect(() => {
-		if (isAuthenticated) {
-			connect();
-		}
+		if (isAuthenticated) connect();
 
 		return () => {
 			if (heartbeatRef.current) clearInterval(heartbeatRef.current);
