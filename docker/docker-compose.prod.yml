@@ -1,0 +1,173 @@
+x-backend-common: &backend-common
+  image: yam-backend
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    target: backend
+  restart: unless-stopped
+  env_file: ../.env.production
+  depends_on:
+    postgres:
+      condition: service_healthy
+    scylla:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ── Infra ────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-yam}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB:-yam}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/pg-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-yam}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  scylla:
+    image: scylladb/scylla:6.2
+    restart: unless-stopped
+    command: --smp ${SCYLLA_SMP:-2} --memory ${SCYLLA_MEMORY:-2G} --overprovisioned 1
+    volumes:
+      - scylla_data:/var/lib/scylla
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy noeviction
+      --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  imgproxy:
+    image: darthsim/imgproxy:latest
+    restart: unless-stopped
+    environment:
+      IMGPROXY_BIND: ":8080"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /uploads
+      IMGPROXY_ALLOWED_SOURCES: "local://"
+      IMGPROXY_MAX_SRC_RESOLUTION: 50
+      IMGPROXY_JPEG_PROGRESSIVE: "true"
+      IMGPROXY_ENABLE_WEBP_DETECTION: "true"
+      IMGPROXY_ENABLE_AVIF_DETECTION: "true"
+      IMGPROXY_ENFORCE_WEBP: "true"
+    volumes:
+      - uploads_data:/uploads
+
+  # ── Migrations ──────────────────────────────────────
+
+  migrate-pg:
+    <<: *backend-common
+    restart: "no"
+    working_dir: /app/packages/db
+    command: bun run src/pg/migrate.ts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrate-scylla:
+    <<: *backend-common
+    restart: "no"
+    command: bun run packages/db/src/scylla/migrate.ts
+    depends_on:
+      scylla:
+        condition: service_healthy
+
+  # ── Apps ───────────────────────────────────────────────────────────
+
+  api:
+    <<: *backend-common
+    command: bun run apps/api/src/index.ts
+    volumes:
+      - uploads_data:/data/uploads
+    depends_on:
+      migrate-pg:
+        condition: service_completed_successfully
+      migrate-scylla:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    <<: *backend-common
+    command: bun run apps/gateway/src/index.ts
+    depends_on:
+      migrate-pg:
+        condition: service_completed_successfully
+      migrate-scylla:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *backend-common
+    command: bun run apps/worker/src/index.ts
+    volumes:
+      - uploads_data:/data/uploads
+    depends_on:
+      migrate-pg:
+        condition: service_completed_successfully
+      migrate-scylla:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  admin:
+    <<: *backend-common
+    command: bun run apps/admin/src/index.ts
+    depends_on:
+      migrate-pg:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # ── Reverse proxy ────────────────────────────────────────────
+
+  nginx:
+    image: yam-nginx
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: nginx
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  scylla_data:
+  redis_data:
+  uploads_data:

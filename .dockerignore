@@ -1,0 +1,11 @@
+node_modules
+.turbo
+dist
+*.log
+.git
+.env
+.env.local
+.env.production
+uploads
+docker/docker-compose.yml
+docs
