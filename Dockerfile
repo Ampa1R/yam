@@ -41,6 +41,9 @@ COPY apps/gateway/ apps/gateway/
 COPY apps/worker/ apps/worker/
 COPY apps/admin/  apps/admin/
 
+# creates workspace-local links required at runtime in containers.
+RUN bun install --frozen-lockfile
+
 RUN mkdir -p /data/uploads
 
 # nginx
