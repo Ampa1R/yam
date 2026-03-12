@@ -2,6 +2,8 @@
 
 Real-time messenger designed for high load (10M+ users), built with modern TypeScript stack.
 
+**Live demo:** [yam.filipp.dev](https://yam.filipp.dev) — test accounts: `+79000000001` ... `+79000000009` (OTP - 000000)
+
 ## Services
 
 | Service | Port | Description |
