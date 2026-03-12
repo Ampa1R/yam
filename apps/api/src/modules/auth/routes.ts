@@ -91,8 +91,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 				.limit(1);
 
 			if (!user) {
-				const displayName = `User ${phone.slice(-4)}`;
-				[user] = await db.insert(schema.users).values({ phone, displayName }).returning();
+				const displayName = `User ${phone.slice(-2)}`;
+				const username = `user${phone.slice(-4)}`;
+				[user] = await db.insert(schema.users).values({ phone, displayName, username }).returning();
 			}
 
 			if (!user) throw Errors.internal("Failed to create user");
