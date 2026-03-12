@@ -1,3 +1,4 @@
+import type Redis from "ioredis";
 import { redis } from "./client";
 
 export interface StreamJob<T = unknown> {
@@ -6,35 +7,19 @@ export interface StreamJob<T = unknown> {
 	attempts: number;
 }
 
-export interface StreamQueueOptions {
-	maxRetries?: number;
-	claimIntervalMs?: number;
-	claimTimeoutMs?: number;
-	blockTimeoutMs?: number;
-	batchSize?: number;
-}
-
-const DEFAULT_OPTIONS: Required<StreamQueueOptions> = {
-	maxRetries: 3,
-	claimIntervalMs: 30_000,
-	claimTimeoutMs: 60_000,
-	blockTimeoutMs: 2_000,
-	batchSize: 10,
-};
+/* producer */
 
 export class StreamQueue<T = unknown> {
-	private readonly stream: string;
-	private readonly dlq: string;
-	private readonly group: string;
-	private readonly opts: Required<StreamQueueOptions>;
-	private running = false;
-	private claimTimer: ReturnType<typeof setInterval> | null = null;
+	readonly stream: string;
+	readonly dlq: string;
+	readonly group: string;
+	readonly maxRetries: number;
 
-	constructor(name: string, opts?: StreamQueueOptions) {
+	constructor(name: string, maxRetries = 3) {
 		this.stream = `stream:${name}`;
 		this.dlq = `stream:dlq:${name}`;
 		this.group = "workers";
-		this.opts = { ...DEFAULT_OPTIONS, ...opts };
+		this.maxRetries = maxRetries;
 	}
 
 	async init(): Promise<void> {
@@ -50,125 +35,184 @@ export class StreamQueue<T = unknown> {
 		const id = await redis.xadd(this.stream, "*", "data", JSON.stringify(data), "attempts", "0");
 		return id!;
 	}
+}
 
-	async process(consumerId: string, handler: (job: StreamJob<T>) => Promise<void>): Promise<void> {
-		await this.init();
+/* consumer */
+
+export interface ConsumerOptions {
+	blockTimeoutMs?: number;
+	batchSize?: number;
+	claimIntervalMs?: number;
+	claimTimeoutMs?: number;
+}
+
+interface Registration {
+	queue: StreamQueue<unknown>;
+	handler: (job: StreamJob<unknown>) => Promise<void>;
+}
+
+const CONSUMER_DEFAULTS: Required<ConsumerOptions> = {
+	blockTimeoutMs: 2_000,
+	batchSize: 10,
+	claimIntervalMs: 30_000,
+	claimTimeoutMs: 60_000,
+};
+
+export class StreamConsumer {
+	private readonly opts: Required<ConsumerOptions>;
+	private readonly registrations: Registration[] = [];
+	private running = false;
+	private blockingClient: Redis | null = null;
+	private claimTimer: ReturnType<typeof setInterval> | null = null;
+
+	constructor(opts?: ConsumerOptions) {
+		this.opts = { ...CONSUMER_DEFAULTS, ...opts };
+	}
+
+	register<T>(queue: StreamQueue<T>, handler: (job: StreamJob<T>) => Promise<void>): this {
+		this.registrations.push({
+			queue: queue as StreamQueue<unknown>,
+			handler: handler as (job: StreamJob<unknown>) => Promise<void>,
+		});
+		return this;
+	}
+
+	async start(consumerId: string): Promise<void> {
+		if (this.registrations.length === 0) throw new Error("No queues registered");
+
+		await Promise.all(this.registrations.map((r) => r.queue.init()));
 		this.running = true;
 
+		this.blockingClient = redis.duplicate();
+		await this.blockingClient.connect();
+		const reader = this.blockingClient;
+
+		const handlerByStream = new Map<string, Registration>();
+		for (const reg of this.registrations) {
+			handlerByStream.set(reg.queue.stream, reg);
+		}
+
+		const streams = this.registrations.map((r) => r.queue.stream);
+		const cursors = streams.map(() => ">");
+
 		this.claimTimer = setInterval(
-			() => this.claimPending(consumerId, handler),
+			() => this.claimAllPending(consumerId),
 			this.opts.claimIntervalMs,
 		);
 
 		while (this.running) {
 			try {
-				const results = await redis.xreadgroup(
+				const results = await reader.xreadgroup(
 					"GROUP",
-					this.group,
+					"workers",
 					consumerId,
 					"COUNT",
 					this.opts.batchSize,
 					"BLOCK",
 					this.opts.blockTimeoutMs,
 					"STREAMS",
-					this.stream,
-					">",
+					...streams,
+					...cursors,
 				);
 
 				if (!results) continue;
 
-				const jobs: { id: string; job: StreamJob<T> }[] = [];
-				for (const [, messages] of results as [string, [string, string[]][]][]) {
+				const tasks: Promise<void>[] = [];
+
+				for (const [streamKey, messages] of results as [string, [string, string[]][]][]) {
+					const reg = handlerByStream.get(streamKey);
+					if (!reg) continue;
+
 					for (const [msgId, fields] of messages) {
-						const fieldMap = new Map<string, string>();
-						for (let i = 0; i < fields.length; i += 2) {
-							fieldMap.set(fields[i]!, fields[i + 1]!);
-						}
-						jobs.push({
-							id: msgId,
-							job: {
-								id: msgId,
-								data: JSON.parse(fieldMap.get("data") ?? "null") as T,
-								attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10),
-							},
-						});
+						const job = parseJob(msgId, fields);
+						tasks.push(
+							reg
+								.handler(job)
+								.then(() => {
+									redis.xack(streamKey, "workers", msgId);
+								})
+								.catch(async (err) => {
+									console.error(`[StreamConsumer:${streamKey}] Job ${msgId} failed:`, err);
+									await this.retryOrDlq(reg.queue, msgId, job, err);
+								}),
+						);
 					}
 				}
 
-				await Promise.all(
-					jobs.map(async ({ id: msgId, job }) => {
-						try {
-							await handler(job);
-							await redis.xack(this.stream, this.group, msgId);
-						} catch (err) {
-							console.error(`[StreamQueue:${this.stream}] Job ${msgId} failed:`, err);
-							await this.retryOrDlq(msgId, job, err);
-						}
-					}),
-				);
+				if (tasks.length > 0) await Promise.all(tasks);
 			} catch (err) {
 				if (this.running) {
-					console.error(`[StreamQueue:${this.stream}] Read error:`, err);
+					console.error("[StreamConsumer] Read error:", err);
 					await Bun.sleep(1000);
 				}
 			}
 		}
 	}
 
-	private async claimPending(
-		consumerId: string,
-		handler: (job: StreamJob<T>) => Promise<void>,
-	): Promise<void> {
-		try {
-			const pending = await redis.xpending(this.stream, this.group, "-", "+", 100);
-
-			if (!Array.isArray(pending) || pending.length === 0) return;
-
-			for (const entry of pending) {
-				const [msgId, , idleTime] = entry as [string, string, number, number];
-				if (idleTime < this.opts.claimTimeoutMs) continue;
-
-				const claimed = await redis.xclaim(
-					this.stream,
-					this.group,
-					consumerId,
-					this.opts.claimTimeoutMs,
-					msgId,
-				);
-
-				for (const [claimedId, fields] of claimed as [string, string[]][]) {
-					if (!fields) continue;
-					const fieldMap = new Map<string, string>();
-					for (let i = 0; i < fields.length; i += 2) {
-						fieldMap.set(fields[i]!, fields[i + 1]!);
-					}
-
-					const job: StreamJob<T> = {
-						id: claimedId,
-						data: JSON.parse(fieldMap.get("data") ?? "null") as T,
-						attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10),
-					};
-
-					if (job.attempts >= this.opts.maxRetries) {
-						await this.moveToDlq(claimedId, job, "max_retries_exceeded");
-					} else {
-						try {
-							await handler(job);
-							await redis.xack(this.stream, this.group, claimedId);
-						} catch (err) {
-							await this.retryOrDlq(claimedId, job, err);
-						}
-					}
-				}
-			}
-		} catch (err) {
-			console.error(`[StreamQueue:${this.stream}] Claim error:`, err);
+	stop(): void {
+		this.running = false;
+		if (this.claimTimer) {
+			clearInterval(this.claimTimer);
+			this.claimTimer = null;
+		}
+		if (this.blockingClient) {
+			this.blockingClient.disconnect();
+			this.blockingClient = null;
 		}
 	}
 
-	private async moveToDlq(msgId: string, job: StreamJob<T>, error: string): Promise<void> {
+	/* pending / claim */
+
+	private async claimAllPending(consumerId: string): Promise<void> {
+		for (const { queue, handler } of this.registrations) {
+			try {
+				const pending = await redis.xpending(queue.stream, queue.group, "-", "+", 100);
+				if (!Array.isArray(pending) || pending.length === 0) continue;
+
+				for (const entry of pending) {
+					const [msgId, , idleTime] = entry as [string, string, number, number];
+					if (idleTime < this.opts.claimTimeoutMs) continue;
+
+					const claimed = await redis.xclaim(
+						queue.stream,
+						queue.group,
+						consumerId,
+						this.opts.claimTimeoutMs,
+						msgId,
+					);
+
+					for (const [claimedId, fields] of claimed as [string, string[]][]) {
+						if (!fields) continue;
+						const job = parseJob(claimedId, fields);
+
+						if (job.attempts >= queue.maxRetries) {
+							await this.moveToDlq(queue, claimedId, job, "max_retries_exceeded");
+						} else {
+							try {
+								await handler(job);
+								await redis.xack(queue.stream, queue.group, claimedId);
+							} catch (err) {
+								await this.retryOrDlq(queue, claimedId, job, err);
+							}
+						}
+					}
+				}
+			} catch (err) {
+				console.error(`[StreamConsumer:${queue.stream}] Claim error:`, err);
+			}
+		}
+	}
+
+	/* retry / dlq */
+
+	private async moveToDlq(
+		queue: StreamQueue<unknown>,
+		msgId: string,
+		job: StreamJob<unknown>,
+		error: string,
+	): Promise<void> {
 		await redis.xadd(
-			this.dlq,
+			queue.dlq,
 			"*",
 			"data",
 			JSON.stringify(job.data),
@@ -179,16 +223,22 @@ export class StreamQueue<T = unknown> {
 			"error",
 			error,
 		);
-		await redis.xack(this.stream, this.group, msgId);
+		await redis.xack(queue.stream, queue.group, msgId);
 	}
 
-	private async retryOrDlq(msgId: string, job: StreamJob<T>, err: unknown): Promise<void> {
+	private async retryOrDlq(
+		queue: StreamQueue<unknown>,
+		msgId: string,
+		job: StreamJob<unknown>,
+		err: unknown,
+	): Promise<void> {
 		const newAttempts = job.attempts + 1;
 		const errorMessage = err instanceof Error ? err.message : String(err);
-		if (newAttempts >= this.opts.maxRetries) {
-			await this.moveToDlq(msgId, { ...job, attempts: newAttempts }, errorMessage);
+
+		if (newAttempts >= queue.maxRetries) {
+			await this.moveToDlq(queue, msgId, { ...job, attempts: newAttempts }, errorMessage);
 			console.error(
-				`[StreamQueue:${this.stream}] Job ${msgId} moved to DLQ after ${newAttempts} attempts`,
+				`[StreamConsumer:${queue.stream}] Job ${msgId} moved to DLQ after ${newAttempts} attempts`,
 			);
 			return;
 		}
@@ -198,22 +248,30 @@ export class StreamQueue<T = unknown> {
 			 redis.call('XACK', KEYS[1], ARGV[3], ARGV[4])
 			 return 1`,
 			1,
-			this.stream,
+			queue.stream,
 			JSON.stringify(job.data),
 			String(newAttempts),
-			this.group,
+			queue.group,
 			msgId,
 		);
 	}
-
-	stop(): void {
-		this.running = false;
-		if (this.claimTimer) {
-			clearInterval(this.claimTimer);
-			this.claimTimer = null;
-		}
-	}
 }
+
+/* helpers */
+
+function parseJob(msgId: string, fields: string[]): StreamJob<unknown> {
+	const fieldMap = new Map<string, string>();
+	for (let i = 0; i < fields.length; i += 2) {
+		fieldMap.set(fields[i]!, fields[i + 1]!);
+	}
+	return {
+		id: msgId,
+		data: JSON.parse(fieldMap.get("data") ?? "null"),
+		attempts: Number.parseInt(fieldMap.get("attempts") ?? "0", 10),
+	};
+}
+
+/* queue instances */
 
 export const queues = {
 	inboxFanout: new StreamQueue<{

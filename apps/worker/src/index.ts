@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { connectRedis, disconnectRedis, queues } from "@yam/db/redis";
+import { StreamConsumer, connectRedis, disconnectRedis, queues } from "@yam/db/redis";
 import { connectScylla, disconnectScylla } from "@yam/db/scylla";
 import { startCronJobs } from "./crons/cleanup";
 import { processFile } from "./jobs/file-process";
@@ -12,15 +12,13 @@ await connectScylla();
 
 console.log(`[Worker] ${WORKER_ID} starting...`);
 
-await queues.inboxFanout.init();
-await queues.fileProcess.init();
-await queues.pushSend.init();
-
-queues.inboxFanout.process(WORKER_ID, processInboxFanout);
-queues.fileProcess.process(WORKER_ID, processFile);
-queues.pushSend.process(WORKER_ID, async (job) => {
+const consumer = new StreamConsumer();
+consumer.register(queues.inboxFanout, processInboxFanout);
+consumer.register(queues.fileProcess, processFile);
+consumer.register(queues.pushSend, async (job) => {
 	console.log(`[Worker] Push notification stub for user ${job.data.userId}: ${job.data.title}`);
 });
+consumer.start(WORKER_ID);
 
 startCronJobs();
 
@@ -31,9 +29,7 @@ async function gracefulShutdown(signal: string) {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	console.log(`[Worker] ${WORKER_ID} ${signal} received, shutting down...`);
-	queues.inboxFanout.stop();
-	queues.fileProcess.stop();
-	queues.pushSend.stop();
+	consumer.stop();
 	await disconnectRedis().catch(() => {});
 	await disconnectScylla().catch(() => {});
 	console.log(`[Worker] Shutdown complete`);

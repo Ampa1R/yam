@@ -13,11 +13,14 @@ interface InboxFanoutPayload {
 }
 
 export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Promise<void> {
+	const t0 = performance.now();
 	const { chatId, senderId, messageType, messagePreview, createdAt } = job.data;
 
 	const msgTime = createdAt ? new Date(createdAt) : new Date();
+	const lag = Date.now() - msgTime.getTime();
 	const lastActivity = msgTime.toISOString();
 
+	const t1 = performance.now();
 	const [chatResult, allMemberships] = await Promise.all([
 		db.select().from(schema.chats).where(eq(schema.chats.id, chatId)).limit(1),
 		db
@@ -25,6 +28,7 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 			.from(schema.chatMembers)
 			.where(eq(schema.chatMembers.chatId, chatId)),
 	]);
+	const t2 = performance.now();
 
 	const chat = chatResult[0];
 	if (!chat) return;
@@ -40,6 +44,7 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 			.where(inArray(schema.users.id, currentMemberIds));
 		displayNameMap = new Map(users.map((u) => [u.id, u.displayName]));
 	}
+	const t3 = performance.now();
 	const lastReadMap = new Map(allMemberships.map((m) => [m.userId, m.lastReadAt]));
 
 	const msgTimeMs = msgTime.getTime();
@@ -54,6 +59,7 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 			return { memberId, newCount };
 		}),
 	);
+	const t4 = performance.now();
 	const unreadMap = new Map(unreadCounts.map(({ memberId, newCount }) => [memberId, newCount]));
 
 	const inboxUpdates: Promise<void>[] = [];
@@ -89,4 +95,9 @@ export async function processInboxFanout(job: StreamJob<InboxFanoutPayload>): Pr
 	}
 
 	await Promise.all(inboxUpdates);
+	const t5 = performance.now();
+
+	console.log(
+		`[InboxFanout] chat=${chatId.slice(0, 8)} members=${currentMemberIds.length} lag=${lag}ms | pg=${(t2 - t1).toFixed(0)}ms names=${(t3 - t2).toFixed(0)}ms unread=${(t4 - t3).toFixed(0)}ms scylla=${(t5 - t4).toFixed(0)}ms total=${(t5 - t0).toFixed(0)}ms`,
+	);
 }
