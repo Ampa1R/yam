@@ -117,7 +117,7 @@ export function LoginPage() {
 							{loading ? "Sending..." : "Get Code"}
 						</button>
 						<p className="text-center text-xs text-text-muted">
-							Demo phones: +79000000001 to +79000000005 (code: 000000)
+							Demo phones: +79000000001 to +79000000009 (code: 000000)
 						</p>
 					</form>
 				) : (
@@ -129,13 +129,13 @@ export function LoginPage() {
 							>
 								Verification Code
 							</label>
-						<input
-							id="otp-input"
-							ref={(el) => el?.focus()}
-							type="text"
-							inputMode="numeric"
-							autoComplete="one-time-code"
-							value={code}
+							<input
+								id="otp-input"
+								ref={(el) => el?.focus()}
+								type="text"
+								inputMode="numeric"
+								autoComplete="one-time-code"
+								value={code}
 								onChange={(e) => {
 									const v = e.target.value.replace(/\D/g, "");
 									if (v.length <= 6) setCode(v);

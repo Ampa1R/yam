@@ -129,7 +129,7 @@ yam/
 ## Demo Mode
 
 Set `OTP_DEMO_ENABLED=true` in `.env`. Demo phones accept OTP code `000000`:
-- +79000000001 through +79000000005
+- +79000000001 through +79000000009
 
 ## Documentation
 
