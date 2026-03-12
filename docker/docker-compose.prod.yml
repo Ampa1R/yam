@@ -84,8 +84,7 @@ services:
     <<: *backend-common
     image: yam-backend-migrate-pg
     restart: "no"
-    working_dir: /app/packages/db
-    command: bun run src/pg/migrate.ts
+    command: bun run packages/db/src/pg/migrate.ts
     depends_on:
       postgres:
         condition: service_healthy
